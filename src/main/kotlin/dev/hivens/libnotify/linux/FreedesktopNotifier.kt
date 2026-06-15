@@ -106,6 +106,10 @@ internal class FreedesktopNotifier private constructor(
         dispatchThread.join(2_000)
         runCatching { bindings.handle("dbus_connection_unref").invokeExact(connection) as Unit }
             .onFailure { log.warn("dbus_connection_unref threw on shutdown: {}", it.message) }
+        // Release the shared arena (library lookup + downcall handles). Safe now
+        // that the dispatch thread has joined; this client backend uses no
+        // upcall stubs, so there is no separate long-lived arena to keep.
+        runCatching { bindings.arena.close() }
     }
 
     // ── Dispatch loop (the only thread that touches the connection) ───────────

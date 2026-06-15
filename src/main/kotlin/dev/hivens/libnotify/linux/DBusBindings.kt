@@ -226,10 +226,13 @@ internal class DBusBindings private constructor(
 
     /**
      * `DBusMessageIter` is a stack-allocated cursor -- libdbus says it's
-     * "small" but exposes no struct definition. The reference impl reserves
-     * 64 bytes, more than enough for any pointer + scratch state.
+     * "small" but exposes no struct definition in the public ABI. The real
+     * struct is 72 bytes on x86_64 / aarch64 (two pointers, nine 32-bit
+     * dummies + an int pad, then two trailing pointers ending at offset 72),
+     * so a 64-byte buffer let libdbus write 8 bytes past the allocation on
+     * every `dbus_message_iter_*` call -- silent arena corruption. Reserve 80.
      */
-    val messageIterLayout: MemoryLayout = MemoryLayout.sequenceLayout(64, ValueLayout.JAVA_BYTE)
+    val messageIterLayout: MemoryLayout = MemoryLayout.sequenceLayout(80, ValueLayout.JAVA_BYTE)
 }
 
 /**

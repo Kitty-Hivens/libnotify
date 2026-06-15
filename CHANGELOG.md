@@ -5,6 +5,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### Fixed
+- Linux: the `DBusMessageIter` scratch buffer was 64 bytes, but the
+  struct is 72 on x86_64 / aarch64 -- libdbus wrote its trailing pointer
+  8 bytes past the allocation on every `dbus_message_iter_*` call,
+  silently corrupting adjacent arena memory. Reserved 80. (Same root
+  cause as the libtray 0.1.1 fix; the D-Bus binding was shared in shape.)
+- Linux: `Notifier.close()` closes the Panama arena (library lookup +
+  downcall handles) after the dispatch thread joins, so repeated
+  create/close cycles no longer leak native memory.
+
+## [0.1.0]
+
 ### Added
 - Initial cross-platform notification API: `Notifier` (facade + `create`),
   `Notification`, `NotificationAction`, `NotificationEvent`
