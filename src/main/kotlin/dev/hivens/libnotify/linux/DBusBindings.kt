@@ -68,13 +68,32 @@ internal class DBusBindings private constructor(
          */
         private val LOAD_SET: List<Triple<String, MemoryLayout?, List<MemoryLayout>>> = listOf(
             // Connection lifecycle
-            Triple("dbus_bus_get",
+            //
+            // PRIVATE connection (dbus_bus_get_private), not the process-shared
+            // dbus_bus_get one: this backend drains the bus with its own
+            // dbus_connection_pop_message loop, and a shared connection's single
+            // incoming queue would let another libdbus user in the process (a
+            // sibling tray library, say) pop -- and drop -- messages meant for
+            // us. A private connection is ours alone.
+            Triple("dbus_bus_get_private",
                 ValueLayout.ADDRESS,                                  // DBusConnection*
                 listOf(ValueLayout.JAVA_INT, ValueLayout.ADDRESS),    // type, error*
+            ),
+            // A private connection must be closed before the final unref.
+            Triple("dbus_connection_close",
+                null,                                                  // void
+                listOf(ValueLayout.ADDRESS),
             ),
             Triple("dbus_connection_unref",
                 null,                                                  // void
                 listOf(ValueLayout.ADDRESS),
+            ),
+            // libdbus defaults exit_on_disconnect ON, which _exit()s the whole
+            // process if the session bus drops -- turn it off so a notification
+            // backend can never take the host application down.
+            Triple("dbus_connection_set_exit_on_disconnect",
+                null,                                                  // void
+                listOf(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),     // conn, dbus_bool_t
             ),
             Triple("dbus_connection_read_write",
                 ValueLayout.JAVA_INT,                                  // dbus_bool_t

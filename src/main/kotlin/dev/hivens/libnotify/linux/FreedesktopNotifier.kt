@@ -104,6 +104,11 @@ internal class FreedesktopNotifier private constructor(
         // one poll (<= 25 ms). Don't hard-interrupt: a half-finished native
         // send/flush could leave the connection in a bad state.
         dispatchThread.join(2_000)
+        // Private connection: close (detach from the bus, release the socket)
+        // before the final unref. A shared dbus_bus_get connection must never
+        // be closed, but this backend owns a private one.
+        runCatching { bindings.handle("dbus_connection_close").invokeExact(connection) as Unit }
+            .onFailure { log.warn("dbus_connection_close threw on shutdown: {}", it.message) }
         runCatching { bindings.handle("dbus_connection_unref").invokeExact(connection) as Unit }
             .onFailure { log.warn("dbus_connection_unref threw on shutdown: {}", it.message) }
         // Release the shared arena (library lookup + downcall handles). Safe now
@@ -365,13 +370,20 @@ internal class FreedesktopNotifier private constructor(
             return Arena.ofConfined().use { setup ->
                 val error = setup.allocate(bindings.errorLayout)
                 bindings.handle("dbus_error_init").invokeExact(error) as Unit
-                val conn = bindings.handle("dbus_bus_get")
+                // Private, not shared: see the dbus_bus_get_private note in
+                // DBusBindings.LOAD_SET -- a shared connection lets another
+                // libdbus user in the process pop our incoming messages off the
+                // single shared queue (and vice versa).
+                val conn = bindings.handle("dbus_bus_get_private")
                     .invokeExact(DBusBindings.DBUS_BUS_SESSION, error) as MemorySegment
                 if (conn.address() == 0L) {
-                    log.info("dbus_bus_get returned NULL -- no session bus, notifications unavailable")
+                    log.info("dbus_bus_get_private returned NULL -- no session bus, notifications unavailable")
                     freeErrorIfSet(bindings, error)  // libdbus heap-allocates the error strings; the arena won't free them
                     return@use null
                 }
+                // Don't let a dropped session bus _exit() the host application.
+                bindings.handle("dbus_connection_set_exit_on_disconnect")
+                    .invokeExact(conn, 0) as Unit
 
                 // Subscribe to ActionInvoked + NotificationClosed. Not fatal if
                 // it fails (we can still post fire-and-forget notifications).

@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.2]
+
+### Fixed
+- Linux: the notification backend opens a private D-Bus connection
+  (`dbus_bus_get_private`) instead of the process-shared `dbus_bus_get`
+  one, and turns off `exit_on_disconnect`. Sharing one connection with
+  another libdbus user that runs its own message pump (for instance a
+  sibling tray library) let either side pop and drop messages destined
+  for the other off the single shared incoming queue. `close()` now
+  closes the private connection before the final unref. (Same root
+  cause as the libtray 0.1.2 fix; the D-Bus binding was shared in shape.)
+
 ## [0.1.1]
 
 ### Fixed
