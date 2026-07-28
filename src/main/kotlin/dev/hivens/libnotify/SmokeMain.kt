@@ -35,7 +35,7 @@ public fun main() {
     val img = BufferedImage(64, 64, BufferedImage.TYPE_INT_ARGB).apply {
         val g = createGraphics()
         try {
-            g.color = Color(0xBB, 0x86, 0xFC)  // matches Nexira's primary
+            g.color = Color(0xBB, 0x86, 0xFC)
             g.fillOval(4, 4, 56, 56)
             g.color = Color.BLACK
             g.fillRect(28, 22, 8, 16)

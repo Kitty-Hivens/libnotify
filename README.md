@@ -81,13 +81,13 @@ notifier.onEvent { event ->
 val handle = notifier.notify(
     Notification(
         title = "Download finished",
-        body = "nexira-2.4.0.zip is ready.",
+        body = "myapp-1.4.0.zip is ready.",
         urgency = Urgency.NORMAL,
         actions = listOf(
             NotificationAction(id = "open", label = "Open"),
             NotificationAction(id = "folder", label = "Show in folder"),
         ),
-        tag = "download-nexira-240",   // posting again with this tag replaces the banner in place
+        tag = "download-myapp-140",   // posting again with this tag replaces the banner in place
     ),
 )
 
