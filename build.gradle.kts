@@ -52,7 +52,7 @@ tasks.register<JavaExec>("runSmoke") {
 
 group = "dev.hivens"
 // Version comes from the git tag at CI time via `-PappVersion=<tag>`;
-// falls back to `git describe` for local development. Mirrors Aura's
+// falls back to `git describe` for local development. Mirrors Nexira's
 // pattern so a shared developer mental model.
 version = providers.gradleProperty("appVersion")
     .orElse(providers.exec {

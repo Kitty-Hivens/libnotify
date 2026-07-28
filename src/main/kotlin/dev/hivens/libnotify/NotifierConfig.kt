@@ -8,7 +8,7 @@ package dev.hivens.libnotify
  *   fallback display name; macOS derives the source from the process bundle and
  *   ignores it. Must be non-blank.
  * @property appId Windows Application User Model ID (AUMID), e.g.
- *   `"Kitty-Hivens.Aura"`. **Required for toasts to appear on Windows** -- the
+ *   `"Kitty-Hivens.Nexira"`. **Required for toasts to appear on Windows** -- the
  *   OS routes and de-duplicates toasts by AUMID and silently drops toasts whose
  *   AUMID is not registered (an installed Start-menu shortcut carrying the
  *   AUMID, or a registered COM server, establishes it). When null, the Windows
