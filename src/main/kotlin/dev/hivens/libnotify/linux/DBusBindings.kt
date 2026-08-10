@@ -11,9 +11,16 @@ import java.lang.invoke.MethodHandle
 
 /**
  * Panama bindings to `libdbus-1` -- the reference D-Bus client library
- * shipped on every desktop Linux. Loaded once per process via
- * [DBusBindings.load]; the resulting object holds method handles for the
- * client subset that the [FreedesktopNotifier] uses.
+ * shipped on every desktop Linux. [DBusBindings.load] builds a fresh arena and
+ * a fresh handle set on every call and caches nothing; the resulting object
+ * holds method handles for the client subset that the [FreedesktopNotifier]
+ * uses.
+ *
+ * Not cached, deliberately. The caller owns the arena and closes it on its own
+ * failure paths and in `close()`. Memoizing this would make one of those closes
+ * poison every later user of the shared instance, and because most call sites
+ * are wrapped in `runCatching`, the backend would degrade silently rather than
+ * fail.
  *
  * Unlike a service that owns a bus name, the notifier is a plain *client* of
  * `org.freedesktop.Notifications`: it sends method calls and reads their

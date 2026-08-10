@@ -101,9 +101,26 @@ internal class FreedesktopNotifier private constructor(
     override fun close() {
         if (!open.compareAndSet(true, false)) return
         // The dispatch loop checks open.get() each iteration and exits within
-        // one poll (<= 25 ms). Don't hard-interrupt: a half-finished native
-        // send/flush could leave the connection in a bad state.
-        dispatchThread.join(2_000)
+        // one poll (<= 25 ms) when it is idle. Don't hard-interrupt: a
+        // half-finished native send/flush could leave the connection in a bad
+        // state.
+        dispatchThread.join(JOIN_TIMEOUT_MS)
+        // Everything below frees memory the dispatch thread may still be
+        // reading. It can be inside dbus_connection_send_with_reply_and_block
+        // for as long as REPLY_TIMEOUT_MS, which is longer than the join budget
+        // above, so "the thread has stopped" is not something the join proves.
+        // Unreffing the connection out from under a live dbus_* call is a
+        // segfault inside libdbus that takes the host down with it; leaking one
+        // connection at shutdown is the better trade. Same guard, and the same
+        // reasoning, as libtray's SNI backend.
+        if (dispatchThread.isAlive) {
+            log.warn(
+                "libnotify-fdo did not stop within {} ms; leaving the D-Bus connection open rather " +
+                    "than freeing memory it is still using. Notifications are gone either way.",
+                JOIN_TIMEOUT_MS,
+            )
+            return
+        }
         // Private connection: close (detach from the bus, release the socket)
         // before the final unref. A shared dbus_bus_get connection must never
         // be closed, but this backend owns a private one.
@@ -227,13 +244,22 @@ internal class FreedesktopNotifier private constructor(
                 bindings.handle("dbus_error_init").invokeExact(error) as Unit
                 val reply = bindings.handle("dbus_connection_send_with_reply_and_block")
                     .invokeExact(connection, msg, REPLY_TIMEOUT_MS, error) as MemorySegment
-                if (reply.address() != 0L) {
+                // A NULL reply is the daemon not answering -- absent, restarted
+                // mid-call, or past the timeout. Reporting success there told a
+                // caller the banner was taken down when nothing had heard the
+                // request, and Notifier.cancel is documented as returning true
+                // only when the backend accepted it.
+                val delivered = reply.address() != 0L
+                if (delivered) {
                     runCatching { bindings.handle("dbus_message_unref").invokeExact(reply) as Unit }
+                } else {
+                    log.warn("CloseNotification got no reply (server absent or slow)")
                 }
                 freeErrorIfSet(error)
-                // The server answers with a NotificationClosed signal which our
-                // pump turns into Dismissed(CLOSED) and uses to clear the maps.
-                return true
+                // On success the server also answers with a NotificationClosed
+                // signal, which our pump turns into Dismissed(CLOSED) and uses
+                // to clear the maps.
+                return delivered
             } finally {
                 runCatching { bindings.handle("dbus_message_unref").invokeExact(msg) as Unit }
             }
@@ -362,6 +388,16 @@ internal class FreedesktopNotifier private constructor(
         /** Reply timeout for the blocking Notify / CloseNotification / GetCapabilities calls. */
         private const val REPLY_TIMEOUT_MS = 5_000
 
+        /**
+         * How long close() waits for the dispatch thread.
+         *
+         * Deliberately shorter than [REPLY_TIMEOUT_MS]: a host shutting down
+         * should not hang five seconds on a wedged daemon. The cost of the
+         * short budget is that the guard below can trip and leak a connection,
+         * which is the cheaper of the two failures.
+         */
+        private const val JOIN_TIMEOUT_MS = 2_000L
+
         fun create(config: NotifierConfig): Notifier? {
             val bindings = DBusBindings.load() ?: run {
                 log.info("libdbus not loadable -- freedesktop notifications unavailable")
@@ -379,11 +415,21 @@ internal class FreedesktopNotifier private constructor(
                 if (conn.address() == 0L) {
                     log.info("dbus_bus_get_private returned NULL -- no session bus, notifications unavailable")
                     freeErrorIfSet(bindings, error)  // libdbus heap-allocates the error strings; the arena won't free them
+                    // Nothing was constructed, so nothing will ever call close()
+                    // -- the arena holding the library lookup and every downcall
+                    // handle has no other owner. Release it here or a machine
+                    // with no session bus leaks it for the process lifetime.
+                    runCatching { bindings.arena.close() }
                     return@use null
                 }
-                // Don't let a dropped session bus _exit() the host application.
-                bindings.handle("dbus_connection_set_exit_on_disconnect")
-                    .invokeExact(conn, 0) as Unit
+                // From here to the constructor, a throw would strand both the
+                // connection and the arena: Notifier.create's runCatching turns
+                // it into a plain "backend unavailable" and nothing else holds
+                // a reference to either.
+                try {
+                    // Don't let a dropped session bus _exit() the host application.
+                    bindings.handle("dbus_connection_set_exit_on_disconnect")
+                        .invokeExact(conn, 0) as Unit
 
                 // Subscribe to ActionInvoked + NotificationClosed. Not fatal if
                 // it fails (we can still post fire-and-forget notifications).
@@ -393,8 +439,15 @@ internal class FreedesktopNotifier private constructor(
                 }.onFailure { log.warn("AddMatch for notification signals failed: {}", it.message) }
                 freeErrorIfSet(bindings, error)  // dbus_error_free re-inits, so a later reuse stays safe
 
-                val caps = parseCapabilities(queryCapabilities(bindings, conn, setup))
-                FreedesktopNotifier(bindings, conn, config, caps)
+                    val caps = parseCapabilities(queryCapabilities(bindings, conn, setup))
+                    FreedesktopNotifier(bindings, conn, config, caps)
+                } catch (t: Throwable) {
+                    log.info("notifier setup failed after connecting: {}", t.message)
+                    runCatching { bindings.handle("dbus_connection_close").invokeExact(conn) as Unit }
+                    runCatching { bindings.handle("dbus_connection_unref").invokeExact(conn) as Unit }
+                    runCatching { bindings.arena.close() }
+                    null
+                }
             }
         }
 

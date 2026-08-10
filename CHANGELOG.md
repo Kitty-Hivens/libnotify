@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Linux: `close()` no longer frees the connection while the dispatch thread may
+  still be inside a libdbus call. The join budget is two seconds, but that
+  thread can sit in `dbus_connection_send_with_reply_and_block` for the full
+  five-second reply timeout, so the join returning proved nothing; unreffing the
+  connection under a live `dbus_*` call is a segfault inside libdbus that takes
+  the host process with it. When the thread is still alive the teardown is
+  skipped and the connection leaks instead, which is the cheaper failure.
+- Linux: `cancel()` returns false when the daemon gave no reply. It returned
+  true unconditionally, so a caller was told the banner had been taken down when
+  nothing had heard the request -- `Notifier.cancel` documents true as meaning
+  the backend accepted it.
+- Linux: `create()` releases the Panama arena when there is no session bus, and
+  releases both the arena and the private connection if setup throws after the
+  connection is open. Neither had any other owner: no `Notifier` exists on those
+  paths, so nothing would ever have called `close()`.
+
+### Changed
+- `SmokeMain` moved into the test source set so it no longer ships in the
+  published library jar. It was packaged in 0.1.0 through 0.1.2, so the next
+  release drops `dev.hivens.libnotify.SmokeMainKt` from the artifact -- it was
+  an interactive harness with a `main`, never API.
+
 ## [0.1.2]
 
 ### Fixed
