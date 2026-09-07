@@ -143,8 +143,10 @@ internal class FreedesktopNotifier private constructor(
         while (open.get()) {
             try {
                 // Run queued API tasks first so notify/cancel latency is just
-                // the bus round-trip, not a poll interval.
-                var task: Runnable? = tasks.poll(25, TimeUnit.MILLISECONDS)
+                // the bus round-trip, not a poll interval. The wait below is
+                // what makes that true: the queue wakes this thread the moment
+                // a task is offered, whatever the timeout says.
+                var task: Runnable? = tasks.poll(SIGNAL_POLL_INTERVAL_MS, TimeUnit.MILLISECONDS)
                 while (task != null) {
                     runCatching { task.run() }.onFailure { log.warn("dispatch task threw: {}", it.message) }
                     task = tasks.poll()
@@ -387,6 +389,23 @@ internal class FreedesktopNotifier private constructor(
 
         /** Reply timeout for the blocking Notify / CloseNotification / GetCapabilities calls. */
         private const val REPLY_TIMEOUT_MS = 5_000
+
+        /**
+         * How long the dispatch thread waits before pumping the bus again.
+         *
+         * It does not bound how quickly a call this library makes goes out: a
+         * task offered to the queue wakes the wait immediately. What it bounds
+         * is how long an incoming signal, an action a user clicked or a
+         * notification the daemon closed, can sit in the socket before it is
+         * read, which is the same hundred milliseconds the sibling tray library
+         * has always used.
+         *
+         * It was twenty five, and that cost four wakeups a second for nothing:
+         * measured in a host carrying this library, the dispatch thread woke
+         * forty times a second and spent four times the CPU of the tray's for
+         * the same work.
+         */
+        private const val SIGNAL_POLL_INTERVAL_MS = 100L
 
         /**
          * How long close() waits for the dispatch thread.
