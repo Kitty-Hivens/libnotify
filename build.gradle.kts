@@ -1,3 +1,5 @@
+import java.util.UUID
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     `java-library`
@@ -104,6 +106,40 @@ tasks.test {
     // Native code under test will eventually want this; harmless on tests
     // that don't reach Panama.
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+}
+
+// Black-box tests against the public API, on a private dbus-daemon with a fake
+// notification server. The address goes into the worker's environment before it
+// starts, so libdbus can never reach the desktop's real session bus from here.
+// One worker per class: libdbus caches the bus address per process, and a class
+// may kill its bus.
+testing {
+    suites {
+        register<JvmTestSuite>("integrationTest") {
+            useJUnitJupiter(libs.versions.junit)
+            dependencies {
+                implementation(project())
+                implementation(libs.kotest.assertions)
+                runtimeOnly(libs.slf4j.simple)
+            }
+            targets.configureEach {
+                testTask.configure {
+                    jvmArgs("--enable-native-access=ALL-UNNAMED")
+                    forkEvery = 1
+                    maxParallelForks = 1
+                    systemProperty("org.slf4j.simpleLogger.defaultLogLevel", "error")
+                    doFirst {
+                        val bus = "unix:abstract=libnotify-it-${UUID.randomUUID()}"
+                        (this as Test).environment("DBUS_SESSION_BUS_ADDRESS", bus)
+                    }
+                }
+            }
+        }
+    }
+}
+
+tasks.named("check") {
+    dependsOn(testing.suites.named("integrationTest"))
 }
 
 tasks.withType<Jar>().configureEach {
