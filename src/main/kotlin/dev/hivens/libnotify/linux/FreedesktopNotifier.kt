@@ -47,6 +47,7 @@ internal class FreedesktopNotifier private constructor(
     private val connection: MemorySegment,
     private val config: NotifierConfig,
     override val capabilities: NotifierCapabilities,
+    advertisedBodyMarkup: Boolean?,
 ) : Notifier {
 
     private val log = LoggerFactory.getLogger("libnotify.Freedesktop")
@@ -63,6 +64,10 @@ internal class FreedesktopNotifier private constructor(
     private val publicToServer = HashMap<String, Long>()
     private val serverToPublic = HashMap<Long, String>()
     private var anonCounter = 0L
+
+    // Null until a server has answered GetCapabilities. Dispatch-thread-owned
+    // once that thread starts, same as the maps above.
+    private var bodyMarkup: Boolean? = advertisedBodyMarkup
 
     private val dispatchThread = Thread({ dispatchLoop() }, "libnotify-fdo-${ProcessHandle.current().pid()}").apply {
         isDaemon = true
@@ -175,6 +180,7 @@ internal class FreedesktopNotifier private constructor(
 
     private fun doNotify(n: Notification): NotificationHandle? {
         Arena.ofConfined().use { call ->
+            val body = if (serverParsesBodyMarkup(call)) escapeBodyMarkup(n.body) else n.body
             val msg = newCall(call, "Notify") ?: return null
             try {
                 val iter = call.allocate(bindings.messageIterLayout)
@@ -188,7 +194,7 @@ internal class FreedesktopNotifier private constructor(
                 bindings.appendString(call, iter, DBusBindings.DBUS_TYPE_STRING,
                     n.iconName ?: config.defaultIconName ?: "")
                 bindings.appendString(call, iter, DBusBindings.DBUS_TYPE_STRING, n.title)
-                bindings.appendString(call, iter, DBusBindings.DBUS_TYPE_STRING, n.body)
+                bindings.appendString(call, iter, DBusBindings.DBUS_TYPE_STRING, body)
 
                 // actions: as = [id, label, id, label, ...]. The reserved
                 // "default" action (empty label = not drawn as a button) makes a
@@ -349,6 +355,18 @@ internal class FreedesktopNotifier private constructor(
         }
     }
 
+    /**
+     * Whether the server treats the body as markup. A server that was absent at
+     * create time may have started since, so an unknown answer is asked again
+     * on every post until one replies. With no reply the text goes unescaped:
+     * a server without the capability would show the entities literally.
+     */
+    private fun serverParsesBodyMarkup(call: Arena): Boolean {
+        bodyMarkup?.let { return it }
+        val advertised = queryCapabilities(bindings, connection, call, CAPABILITIES_TIMEOUT_MS) ?: return false
+        return (CAP_BODY_MARKUP in advertised).also { bodyMarkup = it }
+    }
+
     private fun nextAnonId(): String = "ln-${anonCounter++}"
 
     /**
@@ -386,8 +404,12 @@ internal class FreedesktopNotifier private constructor(
         private const val BUS_NAME = "org.freedesktop.Notifications"
         private const val OBJECT_PATH = "/org/freedesktop/Notifications"
         private const val IFACE = "org.freedesktop.Notifications"
+        private const val CAP_BODY_MARKUP = "body-markup"
 
-        /** Reply timeout for the blocking Notify / CloseNotification / GetCapabilities calls. */
+        /** Shorter than a post's reply timeout, so asking first does not double the wait on a hung server. */
+        private const val CAPABILITIES_TIMEOUT_MS = 2_000
+
+        /** Reply timeout for the blocking Notify / CloseNotification calls. */
         private const val REPLY_TIMEOUT_MS = 5_000
 
         /**
@@ -458,8 +480,14 @@ internal class FreedesktopNotifier private constructor(
                 }.onFailure { log.warn("AddMatch for notification signals failed: {}", it.message) }
                 freeErrorIfSet(bindings, error)  // dbus_error_free re-inits, so a later reuse stays safe
 
-                    val caps = parseCapabilities(queryCapabilities(bindings, conn, setup))
-                    FreedesktopNotifier(bindings, conn, config, caps)
+                    val advertised = queryCapabilities(bindings, conn, setup, CAPABILITIES_TIMEOUT_MS)
+                    FreedesktopNotifier(
+                        bindings,
+                        conn,
+                        config,
+                        parseCapabilities(advertised),
+                        advertised?.let { CAP_BODY_MARKUP in it },
+                    )
                 } catch (t: Throwable) {
                     log.info("notifier setup failed after connecting: {}", t.message)
                     runCatching { bindings.handle("dbus_connection_close").invokeExact(conn) as Unit }
@@ -471,12 +499,17 @@ internal class FreedesktopNotifier private constructor(
         }
 
         /**
-         * Synchronous `GetCapabilities` on the calling thread during setup
-         * (before the dispatch thread starts). Returns the server's capability
-         * strings, or null when the call fails -- typically because no daemon is
-         * running yet (one may activate on the first Notify).
+         * Synchronous `GetCapabilities` on whichever thread owns [conn] right now:
+         * the caller during setup, the dispatch thread afterwards. Returns the
+         * server's capability strings, or null when the call fails, typically
+         * because no daemon is running yet.
          */
-        private fun queryCapabilities(bindings: DBusBindings, conn: MemorySegment, arena: Arena): List<String>? {
+        private fun queryCapabilities(
+            bindings: DBusBindings,
+            conn: MemorySegment,
+            arena: Arena,
+            timeoutMs: Int,
+        ): List<String>? {
             val msg = bindings.handle("dbus_message_new_method_call").invokeExact(
                 arena.allocateUtf8(BUS_NAME),
                 arena.allocateUtf8(OBJECT_PATH),
@@ -488,7 +521,7 @@ internal class FreedesktopNotifier private constructor(
                 val error = arena.allocate(bindings.errorLayout)
                 bindings.handle("dbus_error_init").invokeExact(error) as Unit
                 val reply = bindings.handle("dbus_connection_send_with_reply_and_block")
-                    .invokeExact(conn, msg, 2_000, error) as MemorySegment
+                    .invokeExact(conn, msg, timeoutMs, error) as MemorySegment
                 if (reply.address() == 0L) {
                     if ((bindings.handle("dbus_error_is_set").invokeExact(error) as Int) != 0) {
                         runCatching { bindings.handle("dbus_error_free").invokeExact(error) as Unit }
@@ -553,12 +586,26 @@ internal class FreedesktopNotifier private constructor(
             return NotifierCapabilities(
                 actions = actions,
                 maxActions = if (actions) Int.MAX_VALUE else 0,
-                bodyMarkup = "body-markup" in caps,
+                bodyMarkup = CAP_BODY_MARKUP in caps,
                 icons = "icon-static" in caps || "icon-multi" in caps || "body-images" in caps,
                 replace = true,
                 closeEvents = true,
                 urgency = true,
             )
+        }
+
+        /** Encode plain text for a server that parses the body as XML-based markup. */
+        internal fun escapeBodyMarkup(text: String): String {
+            val sb = StringBuilder(text.length + 8)
+            for (ch in text) {
+                when (ch) {
+                    '&' -> sb.append("&amp;")
+                    '<' -> sb.append("&lt;")
+                    '>' -> sb.append("&gt;")
+                    else -> sb.append(ch)
+                }
+            }
+            return sb.toString()
         }
 
         /** freedesktop urgency hint byte: low=0, normal=1, critical=2. */

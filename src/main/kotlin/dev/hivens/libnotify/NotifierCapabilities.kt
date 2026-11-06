@@ -19,8 +19,10 @@ package dev.hivens.libnotify
  *   [Int.MAX_VALUE] when the server advertises no fixed ceiling (the consumer
  *   stays responsible for not flooding the banner).
  * @property bodyMarkup Whether the server interprets a small HTML-ish subset in
- *   the body (freedesktop `body-markup`). The library still sends body text
- *   verbatim; this only reports the server's stance.
+ *   the body (freedesktop `body-markup`). Informational: the library escapes
+ *   [Notification.body] for such a server, so no markup reaches it. False when
+ *   no server answered at create time, even if one that parses markup starts
+ *   later, and the escaping still follows that later server.
  * @property icons Whether a per-notification image ([Notification.iconBytes] /
  *   [Notification.iconName]) is shown.
  * @property replace Whether posting with a live [Notification.tag] replaces the

@@ -17,9 +17,9 @@ package dev.hivens.libnotify
  *
  * @property title The bold headline. freedesktop calls this the "summary".
  *   Must be non-blank.
- * @property body Secondary text under the title. Plain text; the library does
- *   not interpret markup even where a backend advertises `body-markup`
- *   ([NotifierCapabilities.bodyMarkup] only reports the capability).
+ * @property body Secondary text under the title. Always plain text on every
+ *   backend: `<b>` shows as those three characters. Where a server parses the
+ *   body as markup ([NotifierCapabilities.bodyMarkup]), the library escapes it.
  * @property iconBytes Optional per-notification image as encoded bytes (PNG is
  *   universal). Decoded by the library on backends that take raw pixels
  *   (freedesktop `image-data` hint); see [NotifierCapabilities.icons]. If set,

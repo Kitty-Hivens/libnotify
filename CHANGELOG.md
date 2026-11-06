@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Linux: `Notification.body` is plain text on servers that parse markup too. It
+  went out verbatim, so such a server treated `report<final>.pdf` as a tag and
+  dropped part of the text, and tags in third-party text reached the server as
+  markup. The body is now escaped when the server advertises `body-markup`. A
+  server absent at create time is asked again on each post until one answers.
 - Linux: `close()` no longer frees the connection while the dispatch thread may
   still be inside a libdbus call. The join budget is two seconds, but that
   thread can sit in `dbus_connection_send_with_reply_and_block` for the full
