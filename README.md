@@ -112,6 +112,10 @@ the post.
   available; `notify` returns null and `cancel` returns false on failure.
   Notifications are non-essential UX -- a daemon restart or an unregistered
   AUMID becomes "no banner", never a crashed host.
+- **`notify` blocks.** It waits for the notification service to answer, up to
+  several seconds if the service hangs, so call it off your UI thread. A handle
+  means the service accepted the post, not that anyone saw it: do-not-disturb
+  accepts and shows nothing.
 - **Events run on a backend thread.** `onEvent` handlers fire on the D-Bus pump
   (Linux), a WinRT threadpool thread (Windows), or the Cocoa run loop (macOS).
   Hop to your UI thread yourself before touching UI state.

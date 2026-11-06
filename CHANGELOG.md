@@ -11,13 +11,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   dropped part of the text, and tags in third-party text reached the server as
   markup. The body is now escaped when the server advertises `body-markup`. A
   server absent at create time is asked again on each post until one answers.
+- Linux: `notify`, `cancel` and `close` work from inside an `onEvent` handler.
+  The handler runs on the dispatch thread, so `notify` waited six seconds on
+  itself, returned null, and the banner appeared afterwards. `close` waited out
+  its own join and leaked the connection.
+- Linux, Windows: null from `notify` no longer covers a post that goes out
+  later. A call the dispatch thread has not started within a second is dropped
+  unsent. `close()` releases queued callers at once instead of leaving them to
+  time out, and an interrupted caller keeps its interrupt flag.
+- Linux, Windows: an exception inside `notify` or `cancel` is logged. It used to
+  turn into null or false with no trace.
+- Windows: a failed start ran the teardown twice, calling `RoUninitialize` one
+  more time than `RoInitialize`.
 - Linux: `close()` no longer frees the connection while the dispatch thread may
-  still be inside a libdbus call. The join budget is two seconds, but that
-  thread can sit in `dbus_connection_send_with_reply_and_block` for the full
-  five-second reply timeout, so the join returning proved nothing; unreffing the
-  connection under a live `dbus_*` call is a segfault inside libdbus that takes
-  the host process with it. When the thread is still alive the teardown is
-  skipped and the connection leaks instead, which is the cheaper failure.
+  still be inside a libdbus call, which is a segfault inside libdbus that takes
+  the host process with it. That thread now frees the connection itself as it
+  exits, so a slow daemon delays the release instead of leaking the connection.
 - Linux: `cancel()` returns false when the daemon gave no reply. It returned
   true unconditionally, so a caller was told the banner had been taken down when
   nothing had heard the request -- `Notifier.cancel` documents true as meaning

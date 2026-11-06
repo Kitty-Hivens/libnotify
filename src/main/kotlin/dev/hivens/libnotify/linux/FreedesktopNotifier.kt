@@ -1,6 +1,7 @@
 package dev.hivens.libnotify.linux
 
 import dev.hivens.libnotify.DismissReason
+import dev.hivens.libnotify.DispatchCalls
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.NotificationEvent
@@ -14,9 +15,6 @@ import org.slf4j.LoggerFactory
 import java.io.ByteArrayInputStream
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.imageio.ImageIO
@@ -35,12 +33,10 @@ import javax.imageio.ImageIO
  *
  * **Single-thread ownership.** libdbus connections are not freely
  * thread-safe to share, so every call against [connection] after construction
- * runs on one [dispatchThread]. Public API methods ([notify], [cancel]) enqueue
- * a task and wait on its [CompletableFuture]; the dispatch thread runs the task,
- * then drains incoming signals, and loops. This mirrors libtray's sender-thread
- * design and sidesteps the EDT-freeze that a blocking flush on the caller thread
- * causes -- the caller waits on a future with a timeout instead of holding a
- * native call.
+ * runs on one [dispatchThread], which also frees the connection when it exits.
+ * Public API methods ([notify], [cancel]) hand their work over through [calls] and
+ * wait for the answer. That keeps the native call off the caller's thread, but the
+ * caller still blocks while it waits, so a hung daemon holds it for seconds.
  */
 internal class FreedesktopNotifier private constructor(
     private val bindings: DBusBindings,
@@ -55,8 +51,8 @@ internal class FreedesktopNotifier private constructor(
     private val open = AtomicBoolean(true)
     private val handlers = CopyOnWriteArrayList<(NotificationEvent) -> Unit>()
 
-    /** Tasks queued by [notify] / [cancel], run on the [dispatchThread]. */
-    private val tasks = LinkedBlockingQueue<Runnable>()
+    /** Work from [notify] / [cancel], run on the [dispatchThread]. */
+    private val calls = DispatchCalls(log)
 
     // These maps are touched ONLY on the dispatch thread (doNotify, doCancel,
     // dispatchSignal all run there), so plain HashMaps are safe -- no
@@ -74,6 +70,7 @@ internal class FreedesktopNotifier private constructor(
     }
 
     init {
+        calls.ownedBy(dispatchThread)
         dispatchThread.start()
     }
 
@@ -81,21 +78,12 @@ internal class FreedesktopNotifier private constructor(
 
     override fun notify(notification: Notification): NotificationHandle? {
         if (!open.get()) return null
-        val future = CompletableFuture<NotificationHandle?>()
-        tasks.add(Runnable { future.complete(runCatching { doNotify(notification) }.getOrNull()) })
-        return runCatching { future.get(REPLY_TIMEOUT_MS.toLong() + 1_000, TimeUnit.MILLISECONDS) }
-            .getOrElse {
-                log.warn("notify did not complete in time: {}", it.message)
-                null
-            }
+        return calls.call("Notify", null, QUEUE_WAIT_MS, WORK_CAP_MS) { doNotify(notification) }
     }
 
     override fun cancel(handle: NotificationHandle): Boolean {
         if (!open.get()) return false
-        val future = CompletableFuture<Boolean>()
-        tasks.add(Runnable { future.complete(runCatching { doCancel(handle) }.getOrDefault(false)) })
-        return runCatching { future.get(REPLY_TIMEOUT_MS.toLong() + 1_000, TimeUnit.MILLISECONDS) }
-            .getOrDefault(false)
+        return calls.call("CloseNotification", false, QUEUE_WAIT_MS, WORK_CAP_MS) { doCancel(handle) }
     }
 
     override fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit {
@@ -105,38 +93,19 @@ internal class FreedesktopNotifier private constructor(
 
     override fun close() {
         if (!open.compareAndSet(true, false)) return
-        // The dispatch loop checks open.get() each iteration and exits within
-        // one poll (<= 25 ms) when it is idle. Don't hard-interrupt: a
-        // half-finished native send/flush could leave the connection in a bad
-        // state.
+        calls.shutdown()
+        // Called from an event handler: the loop exits and frees everything once
+        // that handler returns, and joining here would only wait on ourselves.
+        if (Thread.currentThread() === dispatchThread) return
+        // Don't hard-interrupt: a half-finished native send/flush could leave the
+        // connection in a bad state.
         dispatchThread.join(JOIN_TIMEOUT_MS)
-        // Everything below frees memory the dispatch thread may still be
-        // reading. It can be inside dbus_connection_send_with_reply_and_block
-        // for as long as REPLY_TIMEOUT_MS, which is longer than the join budget
-        // above, so "the thread has stopped" is not something the join proves.
-        // Unreffing the connection out from under a live dbus_* call is a
-        // segfault inside libdbus that takes the host down with it; leaking one
-        // connection at shutdown is the better trade. Same guard, and the same
-        // reasoning, as libtray's SNI backend.
         if (dispatchThread.isAlive) {
             log.warn(
-                "libnotify-fdo did not stop within {} ms; leaving the D-Bus connection open rather " +
-                    "than freeing memory it is still using. Notifications are gone either way.",
+                "libnotify-fdo still busy after {} ms, it frees the D-Bus connection when its current call returns",
                 JOIN_TIMEOUT_MS,
             )
-            return
         }
-        // Private connection: close (detach from the bus, release the socket)
-        // before the final unref. A shared dbus_bus_get connection must never
-        // be closed, but this backend owns a private one.
-        runCatching { bindings.handle("dbus_connection_close").invokeExact(connection) as Unit }
-            .onFailure { log.warn("dbus_connection_close threw on shutdown: {}", it.message) }
-        runCatching { bindings.handle("dbus_connection_unref").invokeExact(connection) as Unit }
-            .onFailure { log.warn("dbus_connection_unref threw on shutdown: {}", it.message) }
-        // Release the shared arena (library lookup + downcall handles). Safe now
-        // that the dispatch thread has joined; this client backend uses no
-        // upcall stubs, so there is no separate long-lived arena to keep.
-        runCatching { bindings.arena.close() }
     }
 
     // ── Dispatch loop (the only thread that touches the connection) ───────────
@@ -145,35 +114,55 @@ internal class FreedesktopNotifier private constructor(
         val readWrite = bindings.handle("dbus_connection_read_write")
         val popMessage = bindings.handle("dbus_connection_pop_message")
         val unref = bindings.handle("dbus_message_unref")
-        while (open.get()) {
-            try {
-                // Run queued API tasks first so notify/cancel latency is just
-                // the bus round-trip, not a poll interval. The wait below is
-                // what makes that true: the queue wakes this thread the moment
-                // a task is offered, whatever the timeout says.
-                var task: Runnable? = tasks.poll(SIGNAL_POLL_INTERVAL_MS, TimeUnit.MILLISECONDS)
-                while (task != null) {
-                    runCatching { task.run() }.onFailure { log.warn("dispatch task threw: {}", it.message) }
-                    task = tasks.poll()
-                }
-                // Non-blocking pump of incoming signals.
-                readWrite.invokeExact(connection, 0) as Int
-                while (open.get()) {
-                    val msg = popMessage.invokeExact(connection) as MemorySegment
-                    if (msg.address() == 0L) break
-                    try {
-                        dispatchSignal(msg)
-                    } catch (t: Throwable) {
-                        log.warn("signal dispatch threw, dropping message: {}", t.message)
-                    } finally {
-                        runCatching { unref.invokeExact(msg) as Unit }
+        try {
+            while (open.get()) {
+                try {
+                    // Run queued API work first so notify/cancel latency is just
+                    // the bus round-trip, not a poll interval. The wait below is
+                    // what makes that true: the queue wakes this thread the moment
+                    // work is offered, whatever the timeout says.
+                    calls.runQueued(SIGNAL_POLL_INTERVAL_MS)
+                    // Non-blocking pump of incoming signals.
+                    readWrite.invokeExact(connection, 0) as Int
+                    while (open.get()) {
+                        val msg = popMessage.invokeExact(connection) as MemorySegment
+                        if (msg.address() == 0L) break
+                        try {
+                            dispatchSignal(msg)
+                        } catch (t: Throwable) {
+                            log.warn("signal dispatch threw, dropping message: {}", t.message)
+                        } finally {
+                            runCatching { unref.invokeExact(msg) as Unit }
+                        }
                     }
+                } catch (t: Throwable) {
+                    log.warn("D-Bus dispatch iteration threw: {}", t.message)
+                    Thread.sleep(200)  // don't burn CPU on a permanently broken bus
                 }
-            } catch (t: Throwable) {
-                log.warn("D-Bus dispatch iteration threw: {}", t.message)
-                Thread.sleep(200)  // don't burn CPU on a permanently broken bus
             }
+        } finally {
+            open.set(false)
+            calls.shutdown()
+            releaseConnection()
         }
+    }
+
+    /**
+     * Runs on the dispatch thread as it exits. Nothing else touches the connection
+     * after construction, so there is no live dbus_* call to free memory under,
+     * however long the last one took.
+     */
+    private fun releaseConnection() {
+        // Private connection: close (detach from the bus, release the socket)
+        // before the final unref. A shared dbus_bus_get connection must never
+        // be closed, but this backend owns a private one.
+        runCatching { bindings.handle("dbus_connection_close").invokeExact(connection) as Unit }
+            .onFailure { log.warn("dbus_connection_close threw on shutdown: {}", it.message) }
+        runCatching { bindings.handle("dbus_connection_unref").invokeExact(connection) as Unit }
+            .onFailure { log.warn("dbus_connection_unref threw on shutdown: {}", it.message) }
+        // The shared arena holds the library lookup and downcall handles. This
+        // client backend uses no upcall stubs, so nothing outlives it.
+        runCatching { bindings.arena.close() }
     }
 
     // ── Notify ───────────────────────────────────────────────────────────────
@@ -421,21 +410,25 @@ internal class FreedesktopNotifier private constructor(
          * notification the daemon closed, can sit in the socket before it is
          * read, which is the same hundred milliseconds the sibling tray library
          * has always used.
-         *
-         * It was twenty five, and that cost four wakeups a second for nothing:
-         * measured in a host carrying this library, the dispatch thread woke
-         * forty times a second and spent four times the CPU of the tray's for
-         * the same work.
          */
         private const val SIGNAL_POLL_INTERVAL_MS = 100L
+
+        /**
+         * How long a call may wait for the dispatch thread to pick it up. Past
+         * this it is dropped unsent, so a caller behind a hung call fails fast
+         * and truthfully instead of posting after it has been told null.
+         */
+        private const val QUEUE_WAIT_MS = 1_000L
+
+        /** Safety net over the native timeouts a started call is already bounded by. */
+        private const val WORK_CAP_MS = CAPABILITIES_TIMEOUT_MS + REPLY_TIMEOUT_MS + 1_000L
 
         /**
          * How long close() waits for the dispatch thread.
          *
          * Deliberately shorter than [REPLY_TIMEOUT_MS]: a host shutting down
-         * should not hang five seconds on a wedged daemon. The cost of the
-         * short budget is that the guard below can trip and leak a connection,
-         * which is the cheaper of the two failures.
+         * should not hang five seconds on a wedged daemon. The thread finishes
+         * and frees the connection on its own after close() has returned.
          */
         private const val JOIN_TIMEOUT_MS = 2_000L
 

@@ -1,6 +1,7 @@
 package dev.hivens.libnotify.windows
 
 import dev.hivens.libnotify.DismissReason
+import dev.hivens.libnotify.DispatchCalls
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.NotificationEvent
@@ -17,11 +18,9 @@ import java.lang.invoke.MethodHandles
 import java.lang.invoke.MethodType
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -65,7 +64,7 @@ internal class ToastNotifier private constructor(
 
     private val open = AtomicBoolean(true)
     private val handlers = CopyOnWriteArrayList<(NotificationEvent) -> Unit>()
-    private val tasks = LinkedBlockingQueue<Runnable>()
+    private val calls = DispatchCalls(log)
 
     // Written by the dispatch thread at startup, read by it thereafter.
     @Volatile private var notifier: MemorySegment = MemorySegment.NULL
@@ -81,6 +80,7 @@ internal class ToastNotifier private constructor(
     }
 
     init {
+        calls.ownedBy(dispatchThread)
         dispatchThread.start()
     }
 
@@ -92,17 +92,12 @@ internal class ToastNotifier private constructor(
             log.warn("Windows toasts allow {} actions; dropping {} extra(s)",
                 ToastXml.MAX_ACTIONS, notification.actions.size - ToastXml.MAX_ACTIONS)
         }
-        val future = CompletableFuture<NotificationHandle?>()
-        tasks.add(Runnable { future.complete(runCatching { doNotify(notification) }.getOrNull()) })
-        return runCatching { future.get(6, TimeUnit.SECONDS) }
-            .getOrElse { log.warn("notify did not complete in time: {}", it.message); null }
+        return calls.call("Toast show", null, QUEUE_WAIT_MS, WORK_CAP_MS) { doNotify(notification) }
     }
 
     override fun cancel(handle: NotificationHandle): Boolean {
         if (!open.get()) return false
-        val future = CompletableFuture<Boolean>()
-        tasks.add(Runnable { future.complete(runCatching { doCancel(handle) }.getOrDefault(false)) })
-        return runCatching { future.get(6, TimeUnit.SECONDS) }.getOrDefault(false)
+        return calls.call("Toast hide", false, QUEUE_WAIT_MS, WORK_CAP_MS) { doCancel(handle) }
     }
 
     override fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit {
@@ -112,6 +107,7 @@ internal class ToastNotifier private constructor(
 
     override fun close() {
         if (!open.compareAndSet(true, false)) return
+        calls.shutdown()
         dispatchThread.join(3_000)
     }
 
@@ -128,7 +124,6 @@ internal class ToastNotifier private constructor(
             if (!buildNotifierAndFactory()) {
                 creationOk = false
                 readyLatch.countDown()
-                teardown()
                 return
             }
             ensureHandlers(bindings)
@@ -136,13 +131,14 @@ internal class ToastNotifier private constructor(
             readyLatch.countDown()
 
             while (open.get()) {
-                val task = tasks.poll(100, TimeUnit.MILLISECONDS) ?: continue
-                runCatching { task.run() }.onFailure { log.warn("dispatch task threw: {}", it.message) }
+                calls.runQueued(100)
             }
         } catch (t: Throwable) {
             log.warn("toast dispatch loop crashed: {}", t.message)
             if (readyLatch.count > 0) readyLatch.countDown()
         } finally {
+            open.set(false)
+            calls.shutdown()
             teardown()
         }
     }
@@ -336,7 +332,7 @@ internal class ToastNotifier private constructor(
         fire(NotificationEvent.Dismissed(publicId, mapReason(reasonCode)))
         OWNER.remove(publicId, this)
         // Release the kept toast on the dispatch thread (COM object lifecycle).
-        tasks.add(Runnable { deliveredToasts.remove(publicId)?.let { bindings.release(it) } })
+        calls.post("Toast release") { deliveredToasts.remove(publicId)?.let { bindings.release(it) } }
     }
 
     private fun fire(event: NotificationEvent) {
@@ -365,6 +361,12 @@ internal class ToastNotifier private constructor(
     internal companion object {
         private val log = LoggerFactory.getLogger("libnotify.Toast")
         private val anonCounter = AtomicLong(0)
+
+        /** How long a call may wait for the dispatch thread before it is dropped unsent. */
+        private const val QUEUE_WAIT_MS = 1_000L
+
+        /** WinRT calls have no timeout of their own, so this is what bounds a started one. */
+        private const val WORK_CAP_MS = 5_000L
 
         /** publicId -> owning notifier, for activation routing across instances. Concurrent: callbacks run off-thread. */
         private val OWNER = ConcurrentHashMap<String, ToastNotifier>()

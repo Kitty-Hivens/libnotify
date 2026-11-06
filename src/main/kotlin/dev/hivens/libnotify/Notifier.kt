@@ -35,9 +35,18 @@ public interface Notifier : AutoCloseable {
     /**
      * Post a notification. Returns a [NotificationHandle] whose [id] every
      * resulting [NotificationEvent] carries, or null if the backend could not
-     * post it (closed notifier, server error). When [Notification.tag] is set
-     * and a notification with that tag is still live, this replaces it in place
-     * where the backend supports replacement.
+     * post it (closed notifier, server error, no answer in time). When
+     * [Notification.tag] is set and a notification with that tag is still live,
+     * this replaces it in place where the backend supports replacement.
+     *
+     * A handle means the notification service accepted the post, not that anyone
+     * saw it: do-not-disturb, for one, accepts and shows nothing. Null means it
+     * was not accepted, with one limit: a request already sent cannot be recalled,
+     * so a service that answers after the timeout can still show it.
+     *
+     * Blocks the calling thread until the service answers. Against a hung service
+     * that is up to several seconds, so a UI thread should call this elsewhere,
+     * for example `withContext(Dispatchers.IO) { notifier.notify(n) }`.
      */
     public fun notify(notification: Notification): NotificationHandle?
 
@@ -50,8 +59,9 @@ public interface Notifier : AutoCloseable {
 
     /**
      * Subscribe to notification events. The handler runs on the backend's
-     * dispatch thread (see class KDoc). The returned function unsubscribes the
-     * handler when invoked; idempotent.
+     * dispatch thread (see class KDoc), and may call [notify], [cancel] and [close]
+     * from there. The returned function unsubscribes the handler when invoked,
+     * and is idempotent.
      */
     public fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit
 
