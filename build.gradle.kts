@@ -1,3 +1,6 @@
+@file:OptIn(ExperimentalAbiValidation::class)
+
+import org.jetbrains.kotlin.gradle.dsl.abi.ExperimentalAbiValidation
 import java.util.UUID
 
 plugins {
@@ -86,6 +89,16 @@ kotlin {
         allWarningsAsErrors.set(true)
     }
     explicitApi()
+    // The public API as a committed text dump (api/). check fails when the
+    // compiled API drifts from it, so every API change shows up in review as a
+    // diff of that file. Accept a deliberate change with updateKotlinAbi.
+    abiValidation {
+        enabled.set(true)
+    }
+}
+
+tasks.named("check") {
+    dependsOn("checkKotlinAbi")
 }
 
 dependencies {
