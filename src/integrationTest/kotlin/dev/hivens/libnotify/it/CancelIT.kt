@@ -18,7 +18,7 @@ internal class CancelIT : BusTest() {
     }
 
     @Test
-    fun `cancel reports back as Dismissed with reason CLOSED`() {
+    fun `cancel reports back as exactly one Dismissed with reason CLOSED`() {
         val server = daemon()
         val notifier = notifier()
         val events = notifier.record()
@@ -26,6 +26,7 @@ internal class CancelIT : BusTest() {
         server.awaitNotify()
         notifier.cancel(handle)
         events.next() shouldBe NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED)
+        events.assertNone()
     }
 
     @Test

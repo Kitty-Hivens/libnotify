@@ -11,10 +11,11 @@ package dev.hivens.libnotify
  *
  * Backend coverage varies and is reported by [NotifierCapabilities]:
  * [Activated] and [ActionInvoked] fire wherever the platform reports activation
- * at all; [Dismissed] fires only where [NotifierCapabilities.closeEvents] is
- * true (freedesktop and Windows toast; macOS `NSUserNotification` has no
- * reliable dismissal callback). Switch on what you care about and ignore the
- * rest rather than rely on exhaustive coverage.
+ * at all. [Dismissed] after [Notifier.cancel] fires everywhere, other dismissals
+ * only where [NotifierCapabilities.closeEvents] is true (freedesktop and Windows
+ * toast, while macOS `NSUserNotification` has no reliable dismissal callback).
+ * Switch on what you care about and ignore the rest rather than rely on
+ * exhaustive coverage.
  */
 public sealed interface NotificationEvent {
 
@@ -41,9 +42,12 @@ public sealed interface NotificationEvent {
     ) : NotificationEvent
 
     /**
-     * The notification left the screen without the consumer cancelling it.
-     * [reason] distinguishes a timeout from an explicit user dismissal where
-     * the platform reports it.
+     * The notification left the screen, for any reason. [reason] tells a timeout,
+     * the user, and [Notifier.cancel] apart where the platform reports it.
+     *
+     * A successful [Notifier.cancel] produces exactly one, with reason
+     * [DismissReason.CLOSED], on every platform. It may arrive before or after
+     * cancel returns, and on macOS it runs on the thread that called cancel.
      */
     public data class Dismissed(
         override val notificationId: String,
@@ -65,7 +69,7 @@ public enum class DismissReason {
     /** The user actively dismissed it (swiped/closed the banner). */
     DISMISSED_BY_USER,
 
-    /** Closed programmatically, typically by [Notifier.cancel]. */
+    /** Closed by [Notifier.cancel]. */
     CLOSED,
 
     /** The platform reported a dismissal without a distinguishable reason. */

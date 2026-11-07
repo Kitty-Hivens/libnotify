@@ -1,7 +1,9 @@
 package dev.hivens.libnotify.it
 
+import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationAction
+import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.Notifier
 import dev.hivens.libnotify.NotifierConfig
 import io.kotest.matchers.comparables.shouldBeLessThan
@@ -35,6 +37,8 @@ internal class PlatformSmokeIT {
         println("create: ${created?.capabilities ?: "null, backend unavailable on this runner"}")
         if (created == null) return
 
+        val events = RecordedEvents()
+        created.onEvent { events.add(it) }
         created.use {
             val notification = Notification(
                 title = "libnotify CI",
@@ -55,6 +59,11 @@ internal class PlatformSmokeIT {
                 var cancelled: Boolean? = null
                 elapsedMillis { cancelled = it.cancel(handle) } shouldBeLessThan 15_000L
                 println("cancel: $cancelled")
+                // The library fires this one itself, so it is a contract even
+                // where the runner's session shows nothing.
+                if (cancelled == true) {
+                    events.next() shouldBe NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED)
+                }
             }
         }
         created.isOpen shouldBe false

@@ -232,13 +232,17 @@ internal class ToastNotifier private constructor(
 
     private fun doCancel(handle: NotificationHandle): Boolean {
         val toast = deliveredToasts[handle.id] ?: return false
+        // Unrouted before Hide: a Dismissed callback that Hide sets off then finds
+        // no owner, and the event fired below is the only one.
+        OWNER.remove(handle.id, this)
         val hr = bindings.downcall(
             bindings.vtableFn(notifier, WinRtBindings.IDX_HIDE),
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
         ).invokeExact(notifier, toast) as Int
         deliveredToasts.remove(handle.id)?.let { bindings.release(it) }
-        OWNER.remove(handle.id, this)
-        return hr >= 0
+        if (hr < 0) return false
+        fire(NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED))
+        return true
     }
 
     private fun createXmlDocument(call: Arena, xml: String): MemorySegment? {

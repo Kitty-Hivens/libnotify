@@ -49,6 +49,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   the library. Reading it is unchanged.
 - `Notifier.create` is a static method for Java callers, and the empty
   `NotificationAction.Companion` is gone.
+- A successful `cancel` produces exactly one `Dismissed(CLOSED)` on every
+  platform. Linux already sent it, Windows raced its own callback and could send
+  none, and macOS sent none. The KDoc said cancel produced no `Dismissed` at all
+  while also documenting `CLOSED` as the reason for one.
 - The `appId` KDoc says what Linux does with it: it goes out as the
   `desktop-entry` hint. It said the opposite.
 - `SmokeMain` moved into the test source set so it no longer ships in the

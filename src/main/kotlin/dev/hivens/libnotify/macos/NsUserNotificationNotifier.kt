@@ -1,5 +1,6 @@
 package dev.hivens.libnotify.macos
 
+import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.EventListeners
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
@@ -77,8 +78,12 @@ internal class NsUserNotificationNotifier private constructor(
 
     override fun cancel(handle: NotificationHandle): Boolean {
         if (!open.get()) return false
-        return runCatching { synchronized(this) { removeDelivered(handle.id) } }
+        val removed = runCatching { synchronized(this) { removeDelivered(handle.id) } }
             .getOrElse { log.warn("cancel threw: {}", it.message); false }
+        // NSUserNotification reports no dismissals, but this one the library made
+        // itself. Fired outside the lock, so a listener may call back in.
+        if (removed) fire(NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED))
+        return removed
     }
 
     override fun onEvent(listener: NotificationListener): Subscription = listeners.add(listener)

@@ -27,7 +27,9 @@ package dev.hivens.libnotify
  *   [Notification.iconName]) is shown.
  * @property replace Whether posting with a live [Notification.tag] replaces the
  *   prior banner in place (versus stacking a second one).
- * @property closeEvents Whether [NotificationEvent.Dismissed] is emitted.
+ * @property closeEvents Whether [NotificationEvent.Dismissed] is emitted for
+ *   dismissals the library did not cause, a timeout or the user. The one after
+ *   [Notifier.cancel] is emitted regardless.
  * @property urgency Whether [Urgency] changes presentation.
  */
 // Only the library constructs this, so a new capability is a new property and
