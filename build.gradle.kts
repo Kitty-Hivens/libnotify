@@ -141,6 +141,11 @@ testing {
                     forkEvery = 1
                     maxParallelForks = 1
                     systemProperty("org.slf4j.simpleLogger.defaultLogLevel", "error")
+                    // The suite tests the system's libdbus and dbus-daemon, which no
+                    // task input captures, so a cached or up-to-date result proves
+                    // nothing about this machine or this tag.
+                    outputs.cacheIf { false }
+                    outputs.upToDateWhen { false }
                     doFirst {
                         val bus = "unix:abstract=libnotify-it-${UUID.randomUUID()}"
                         (this as Test).environment("DBUS_SESSION_BUS_ADDRESS", bus)

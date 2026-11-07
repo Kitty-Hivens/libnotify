@@ -38,7 +38,9 @@ internal class BusLossIT : BusTest() {
         val before = daemon()
         val notifier = notifier()
         val events = notifier.record()
-        val old = notifier.notify(titled("before", tag = "before"))
+        notifier.notify(titled("v1", tag = "reposted")) shouldNotBe null
+        before.awaitNotify()
+        val old = notifier.notify(titled("left behind", tag = "left-behind"))
         old shouldNotBe null
         before.awaitNotify()
 
@@ -48,16 +50,18 @@ internal class BusLossIT : BusTest() {
 
         TestBus.ensureRunning()
         val after = daemon()
-        notifier.notify(titled("back", tag = "back"))?.id shouldBe "back"
+        notifier.notify(titled("v2", tag = "reposted"))?.id shouldBe "reposted"
         val got = after.awaitNotify()
-        got.summary shouldBe "back"
-        // A server on the new bus starts its ids over, so nothing old may be asked to be replaced.
+        got.summary shouldBe "v2"
+        // The tag was live on the old bus. A server on the new one starts its ids
+        // over, so the old id must not be offered for replacement.
         got.replacesId shouldBe 0
 
         after.click(got.id)
-        events.next() shouldBe NotificationEvent.Activated("back")
-        // The old notification lived on the old bus and cannot be cancelled any more.
+        events.next() shouldBe NotificationEvent.Activated("reposted")
+        // The other notification lived on the old bus and cannot be cancelled any more.
         notifier.cancel(old!!) shouldBe false
+        after.assertNoCloseRequest()
         notifier.isOpen shouldBe true
     }
 }

@@ -134,13 +134,14 @@ class ToastXmlTest {
 
     @Test
     fun `control characters do not break the payload`() = knownGap("characters XML 1.0 forbids are passed through") {
-        for (text in listOf("bell\u0007", "escape\u001B[31m", "vertical tab\u000B", "nul\u0000")) {
-            parse(ToastXml.build(everything(text), imageUri = null))
-        }
+        val payloads = listOf("bell\u0007", "escape\u001B[31m", "vertical tab\u000B", "nul\u0000")
+            .map { ToastXml.build(everything(it), imageUri = null) }
+        gap { payloads.forEach { parse(it) } }
     }
 
     @Test
     fun `a lone surrogate does not break the payload`() = knownGap("characters XML 1.0 forbids are passed through") {
-        parse(ToastXml.build(everything("half an emoji \uD83D"), imageUri = null))
+        val payload = ToastXml.build(everything("half an emoji \uD83D"), imageUri = null)
+        gap { parse(payload) }
     }
 }

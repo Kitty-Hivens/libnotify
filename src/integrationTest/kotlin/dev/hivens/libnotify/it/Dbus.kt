@@ -53,9 +53,14 @@ internal object Dbus {
     val messageUnref = fn("dbus_message_unref", null, pointer)
     val messageGetType = fn("dbus_message_get_type", int, pointer)
     val messageGetMember = fn("dbus_message_get_member", pointer, pointer)
+    val messageGetPath = fn("dbus_message_get_path", pointer, pointer)
+    val messageGetInterface = fn("dbus_message_get_interface", pointer, pointer)
+    val messageGetSignature = fn("dbus_message_get_signature", pointer, pointer)
     val newMethodReturn = fn("dbus_message_new_method_return", pointer, pointer)
     val newError = fn("dbus_message_new_error", pointer, pointer, pointer, pointer)
     val newSignal = fn("dbus_message_new_signal", pointer, pointer, pointer, pointer)
+    val newMethodCall = fn("dbus_message_new_method_call", pointer, pointer, pointer, pointer, pointer)
+    val sendWithReplyAndBlock = fn("dbus_connection_send_with_reply_and_block", pointer, pointer, pointer, int, pointer)
 
     val iterInit = fn("dbus_message_iter_init", int, pointer, pointer)
     val iterInitAppend = fn("dbus_message_iter_init_append", null, pointer, pointer)
@@ -94,6 +99,12 @@ internal fun connect(address: String): MemorySegment = Arena.ofConfined().use { 
     Dbus.busRegister.invokeExact(conn, error) as Int
     failOnError(error, "register on $address")
     conn
+}
+
+/** A `const char *` accessor on a message, or null. */
+internal fun messageString(accessor: MethodHandle, msg: MemorySegment): String? {
+    val pointer = accessor.invokeExact(msg) as MemorySegment
+    return if (pointer.address() == 0L) null else pointer.reinterpret(Long.MAX_VALUE).getString(0)
 }
 
 internal fun disconnect(conn: MemorySegment) {
@@ -151,6 +162,21 @@ private fun readValue(iter: MemorySegment, arena: Arena): Any? {
             val out = arena.allocate(ValueLayout.JAVA_BYTE)
             Dbus.iterGetBasic.invokeExact(iter, out) as Unit
             out.get(ValueLayout.JAVA_BYTE, 0)
+        }
+        'n', 'q' -> {
+            val out = arena.allocate(ValueLayout.JAVA_SHORT)
+            Dbus.iterGetBasic.invokeExact(iter, out) as Unit
+            out.get(ValueLayout.JAVA_SHORT, 0)
+        }
+        'x', 't' -> {
+            val out = arena.allocate(ValueLayout.JAVA_LONG)
+            Dbus.iterGetBasic.invokeExact(iter, out) as Unit
+            out.get(ValueLayout.JAVA_LONG, 0)
+        }
+        'd' -> {
+            val out = arena.allocate(ValueLayout.JAVA_DOUBLE)
+            Dbus.iterGetBasic.invokeExact(iter, out) as Unit
+            out.get(ValueLayout.JAVA_DOUBLE, 0)
         }
         'v' -> {
             val sub = arena.newIter()
@@ -213,6 +239,37 @@ internal fun appendStringArray(iter: MemorySegment, arena: Arena, values: List<S
     Dbus.iterOpen.invokeExact(iter, 'a'.code, arena.allocateFrom("s"), sub) as Int
     for (value in values) appendString(sub, arena, value)
     Dbus.iterClose.invokeExact(iter, sub) as Int
+}
+
+/**
+ * Call [member] on the notification service from [conn], with whatever arguments
+ * [fill] appends, and say whether it answered with a method return. For testing
+ * the fake server itself: the library's own calls go through its own bindings.
+ */
+internal fun callService(
+    conn: MemorySegment,
+    path: String,
+    member: String,
+    fill: (MemorySegment, Arena) -> Unit,
+): Boolean = Arena.ofConfined().use { arena ->
+    val msg = Dbus.newMethodCall.invokeExact(
+        arena.allocateFrom(BUS_NAME),
+        arena.allocateFrom(path),
+        arena.allocateFrom(IFACE),
+        arena.allocateFrom(member),
+    ) as MemorySegment
+    val iter = arena.newIter()
+    Dbus.iterInitAppend.invokeExact(msg, iter) as Unit
+    fill(iter, arena)
+    val error = arena.newError()
+    val reply = Dbus.sendWithReplyAndBlock.invokeExact(conn, msg, 5_000, error) as MemorySegment
+    Dbus.messageUnref.invokeExact(msg) as Unit
+    if (reply.address() == 0L) {
+        Dbus.errorFree.invokeExact(error) as Unit
+        return@use false
+    }
+    Dbus.messageUnref.invokeExact(reply) as Unit
+    true
 }
 
 internal fun sendSignal(

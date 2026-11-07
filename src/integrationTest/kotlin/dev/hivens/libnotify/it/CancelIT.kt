@@ -24,9 +24,11 @@ internal class CancelIT : BusTest() {
         val events = notifier.record()
         val handle = notifier.notify(titled("t"))!!
         server.awaitNotify()
-        notifier.cancel(handle)
+        notifier.cancel(handle) shouldBe true
         events.next() shouldBe NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED)
-        events.assertNone()
+        notifier.notify(titled("marker", tag = "marker"))
+        val marker = server.awaitNotify().id
+        events.assertNothingBefore(server, marker, NotificationEvent.Activated("marker"))
     }
 
     @Test
@@ -36,17 +38,20 @@ internal class CancelIT : BusTest() {
         val events = notifier.record()
         val handle = notifier.notify(titled("t"))!!
         server.closed(server.awaitNotify().id, 2)
-        events.next()
+        events.next() shouldBe NotificationEvent.Dismissed(handle.id, DismissReason.DISMISSED_BY_USER)
         notifier.cancel(handle) shouldBe false
+        server.assertNoCloseRequest()
     }
 
     @Test
-    fun `a handle from another notifier is unknown here`() {
-        daemon()
+    fun `a notifier that never posted an id does not know its handle`() {
+        val server = daemon()
         val owner = notifier()
         val other = notifier()
         val handle = owner.notify(titled("t", tag = "t"))!!
+        server.awaitNotify()
         other.cancel(handle) shouldBe false
+        server.assertNoCloseRequest()
     }
 
     @Test

@@ -141,7 +141,8 @@ internal class LifecycleIT : BusTest() {
     fun `close returns before a slow call does, and the thread cleans up after it`() {
         val server = daemon()
         val notifier = notifier()
-        server.mode = ServerMode.Slow(4_000)
+        // Longer than close()'s two-second join, well inside the five-second reply timeout.
+        server.mode = ServerMode.Slow(3_000)
         val inFlight = CompletableFuture.supplyAsync { notifier.notify(titled("slow", tag = "slow")) }
         Thread.sleep(200)
         elapsedMillis { notifier.close() } shouldBeLessThan 3_000L
@@ -168,7 +169,8 @@ internal class LifecycleIT : BusTest() {
         closing.get(10, TimeUnit.SECONDS)
         inFlight.get(10, TimeUnit.SECONDS) shouldNotBe null
         server.awaitNotify().summary shouldBe "first"
-        server.assertNoNotify(500)
+        // Had it gone out, the server would record it one 2.5 s stall after "first".
+        server.assertNoNotify(3_000)
     }
 
     @Test

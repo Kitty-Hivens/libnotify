@@ -5,6 +5,7 @@ import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.Notifier
 import dev.hivens.libnotify.NotifierConfig
 import io.kotest.assertions.fail
+import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
@@ -30,10 +31,15 @@ internal abstract class BusTest {
         TestBus.address
     }
 
+    /** Closing a daemon also fails the test if its thread died or the library broke the protocol. */
     @AfterEach
     fun closeEverything() {
         notifiers.forEach { it.close() }
-        daemons.forEach { it.close() }
+        val failures = daemons.mapNotNull { runCatching { it.close() }.exceptionOrNull() }
+        failures.firstOrNull()?.let { first ->
+            failures.drop(1).forEach { first.addSuppressed(it) }
+            throw first
+        }
     }
 
     protected fun daemon(
@@ -49,6 +55,17 @@ internal abstract class BusTest {
     protected fun stop(daemon: FakeDaemon) {
         daemons.remove(daemon)
         daemon.close()
+    }
+
+    /**
+     * Proves that no event is pending before [marker] by making the server raise
+     * one more event and checking it is the next to arrive. The server sends
+     * everything on one connection, so this needs no timing window. Only valid
+     * for events the same server would have raised.
+     */
+    protected fun RecordedEvents.assertNothingBefore(server: FakeDaemon, markerId: Int, expected: NotificationEvent) {
+        server.click(markerId)
+        next() shouldBe expected
     }
 
     protected fun Notifier.record(): RecordedEvents = RecordedEvents().also { recorded ->
@@ -88,16 +105,41 @@ internal fun pngOf(vararg argb: Int): ByteArray {
 }
 
 /**
- * The contract [body] states is not met yet. The test passes while the assertion
- * fails, and fails as soon as it stops failing, so a fix cannot leave the entry
- * behind. Anything but a failed assertion is a real failure.
+ * A contract the library does not meet yet. [body] sets the scene with ordinary
+ * assertions and states the unmet contract inside exactly one [GapScope.gap]
+ * block. The test passes while that block fails, and fails once it passes, so a
+ * fix cannot leave the entry behind.
+ *
+ * Only a failure inside [GapScope.gap] counts as the gap. A failure anywhere
+ * else, a setup that did not work or a notification that never arrived, fails
+ * the test for real, so a broken backend cannot pass as a known gap.
  */
-internal fun knownGap(reason: String, body: () -> Unit) {
+internal fun knownGap(reason: String, body: GapScope.() -> Unit) {
+    val scope = GapScope()
     try {
-        body()
-    } catch (expected: AssertionError) {
-        System.err.println("known gap: $reason (${expected.message})")
+        scope.body()
+    } catch (open: GapScope.StillOpen) {
+        System.err.println("known gap: $reason (${open.cause?.message})")
         return
     }
+    if (!scope.checked) fail("knownGap '$reason' never reached its gap { } block")
     fail("This gap is closed, turn it into a plain test: $reason")
+}
+
+internal class GapScope {
+    internal class StillOpen(cause: AssertionError) : RuntimeException(cause)
+
+    internal var checked = false
+        private set
+
+    /** The contract that is not met yet. Must be the last thing [knownGap]'s body does. */
+    fun gap(assertion: () -> Unit) {
+        check(!checked) { "a knownGap has exactly one gap { } block" }
+        checked = true
+        try {
+            assertion()
+        } catch (failed: AssertionError) {
+            throw StillOpen(failed)
+        }
+    }
 }

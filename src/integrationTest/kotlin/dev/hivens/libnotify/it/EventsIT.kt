@@ -5,7 +5,9 @@ import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationListener
+import io.kotest.matchers.comparables.shouldBeLessThan
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -86,11 +88,11 @@ internal class EventsIT : BusTest() {
         val server = daemon(firstId = 100)
         val notifier = notifier()
         val events = notifier.record()
-        notifier.notify(titled("t"))
-        server.awaitNotify()
+        notifier.notify(titled("t", tag = "t"))
+        val ours = server.awaitNotify().id
         server.click(55)
         server.closed(55, 1)
-        events.assertNone()
+        events.assertNothingBefore(server, ours, NotificationEvent.Activated("t"))
     }
 
     @Test
@@ -98,12 +100,14 @@ internal class EventsIT : BusTest() {
         val server = daemon()
         val notifier = notifier()
         val events = notifier.record()
-        notifier.notify(titled("t"))
+        notifier.notify(titled("t", tag = "t"))
         val id = server.awaitNotify().id
         server.closed(id, 1)
-        events.next()
+        events.next() shouldBe NotificationEvent.Dismissed("t", DismissReason.EXPIRED)
+        notifier.notify(titled("marker", tag = "marker"))
+        val marker = server.awaitNotify().id
         server.click(id)
-        events.assertNone()
+        events.assertNothingBefore(server, marker, NotificationEvent.Activated("marker"))
     }
 
     @Test
@@ -159,9 +163,13 @@ internal class EventsIT : BusTest() {
         first.close()
         first.close()
         notifier.notify(titled("t", tag = "t"))
-        server.click(server.awaitNotify().id)
+        val id = server.awaitNotify().id
+        notifier.notify(titled("marker", tag = "marker"))
+        val marker = server.awaitNotify().id
+        server.click(id)
         events.next() shouldBe NotificationEvent.Activated("t")
-        events.assertNone()
+        // A registration that survived twice would have queued a second "t" here.
+        events.assertNothingBefore(server, marker, NotificationEvent.Activated("marker"))
     }
 
     @Test
@@ -189,26 +197,34 @@ internal class EventsIT : BusTest() {
         val secondId = server.awaitNotify().id
         server.click(firstId)
         firstEvents.next() shouldBe NotificationEvent.Activated("one")
-        secondEvents.assertNone()
+        // Each notifier's events arrive in the server's order, so the next event
+        // either side sees settles whether a stray one came first.
         server.click(secondId)
         secondEvents.next() shouldBe NotificationEvent.Activated("two")
-        firstEvents.assertNone()
+        server.click(firstId)
+        firstEvents.next() shouldBe NotificationEvent.Activated("one")
     }
 
     @Test
-    fun `a slow handler delays only events, the next call still goes through`() {
+    fun `a slow listener holds back other threads, whose calls give up unsent after a second`() {
         val server = daemon()
         val notifier = notifier()
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         notifier.onEvent {
             entered.countDown()
-            release.await(5, TimeUnit.SECONDS)
+            release.await(10, TimeUnit.SECONDS)
         }
-        notifier.notify(titled("t"))
+        notifier.notify(titled("t")) shouldNotBe null
         server.click(server.awaitNotify().id)
         entered.await(5, TimeUnit.SECONDS) shouldBe true
-        release.countDown()
-        notifier.notify(titled("next"))?.id?.isNotEmpty() shouldBe true
+        try {
+            elapsedMillis { notifier.notify(titled("behind the listener")) shouldBe null } shouldBeLessThan 2_000L
+        } finally {
+            release.countDown()
+        }
+        server.assertNoNotify()
+        notifier.notify(titled("after the listener"))?.id?.isNotEmpty() shouldBe true
+        server.awaitNotify().summary shouldBe "after the listener"
     }
 }
