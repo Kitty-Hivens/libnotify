@@ -39,10 +39,15 @@ import javax.imageio.ImageIO
  * Public API methods ([notify], [cancel]) hand their work over through [calls] and
  * wait for the answer. That keeps the native call off the caller's thread, but the
  * caller still blocks while it waits, so a hung daemon holds it for seconds.
+ *
+ * **Bus loss.** When the session bus goes away the next call opens a new
+ * connection, so a restarted bus needs nothing from the host application. What
+ * belonged to the old bus is dropped with it: notifications posted before no
+ * longer report events and cannot be cancelled.
  */
 internal class FreedesktopNotifier private constructor(
     private val bindings: DBusBindings,
-    private val connection: MemorySegment,
+    initialConnection: MemorySegment,
     private val config: NotifierConfig,
     override val capabilities: NotifierCapabilities,
     advertisedBodyMarkup: Boolean?,
@@ -66,6 +71,9 @@ internal class FreedesktopNotifier private constructor(
     // Null until a server has answered GetCapabilities. Dispatch-thread-owned
     // once that thread starts, same as the maps above.
     private var bodyMarkup: Boolean? = advertisedBodyMarkup
+
+    // Replaced by ensureConnected when the bus drops. Dispatch-thread-owned.
+    private var connection: MemorySegment = initialConnection
 
     private val dispatchThread = Thread({ dispatchLoop() }, "libnotify-fdo-${ProcessHandle.current().pid()}").apply {
         isDaemon = true
@@ -152,21 +160,33 @@ internal class FreedesktopNotifier private constructor(
      * however long the last one took.
      */
     private fun releaseConnection() {
-        // Private connection: close (detach from the bus, release the socket)
-        // before the final unref. A shared dbus_bus_get connection must never
-        // be closed, but this backend owns a private one.
-        runCatching { bindings.handle("dbus_connection_close").invokeExact(connection) as Unit }
-            .onFailure { log.warn("dbus_connection_close threw on shutdown: {}", it.message) }
-        runCatching { bindings.handle("dbus_connection_unref").invokeExact(connection) as Unit }
-            .onFailure { log.warn("dbus_connection_unref threw on shutdown: {}", it.message) }
+        closeConnection(bindings, connection)
         // The shared arena holds the library lookup and downcall handles. This
         // client backend uses no upcall stubs, so nothing outlives it.
         runCatching { bindings.arena.close() }
     }
 
+    /**
+     * Dispatch thread only. Replaces a connection whose bus went away, and says
+     * whether there is a live one to use. The ids, routes and capabilities all
+     * came from the server on the old bus, so they go with it.
+     */
+    private fun ensureConnected(): Boolean {
+        if ((bindings.handle("dbus_connection_get_is_connected").invokeExact(connection) as Int) != 0) return true
+        val fresh = connectSession(bindings) ?: return false
+        closeConnection(bindings, connection)
+        connection = fresh
+        publicToServer.clear()
+        serverToPublic.clear()
+        bodyMarkup = null
+        log.info("reconnected to the session bus")
+        return true
+    }
+
     // ── Notify ───────────────────────────────────────────────────────────────
 
     private fun doNotify(n: Notification): NotificationHandle? {
+        if (!ensureConnected()) return null
         Arena.ofConfined().use { call ->
             val body = if (serverParsesBodyMarkup(call)) escapeBodyMarkup(n.body) else n.body
             val msg = newCall(call, "Notify") ?: return null
@@ -229,6 +249,7 @@ internal class FreedesktopNotifier private constructor(
     }
 
     private fun doCancel(handle: NotificationHandle): Boolean {
+        if (!ensureConnected()) return false
         val serverId = publicToServer[handle.id] ?: return false
         Arena.ofConfined().use { call ->
             val msg = newCall(call, "CloseNotification") ?: return false
@@ -432,58 +453,86 @@ internal class FreedesktopNotifier private constructor(
                 log.info("libdbus not loadable -- freedesktop notifications unavailable")
                 return null
             }
-            return Arena.ofConfined().use { setup ->
-                val error = setup.allocate(bindings.errorLayout)
-                bindings.handle("dbus_error_init").invokeExact(error) as Unit
-                // Private, not shared: see the dbus_bus_get_private note in
-                // DBusBindings.LOAD_SET -- a shared connection lets another
-                // libdbus user in the process pop our incoming messages off the
-                // single shared queue (and vice versa).
-                val conn = bindings.handle("dbus_bus_get_private")
-                    .invokeExact(DBusBindings.DBUS_BUS_SESSION, error) as MemorySegment
-                if (conn.address() == 0L) {
-                    log.info("dbus_bus_get_private returned NULL -- no session bus, notifications unavailable")
-                    freeErrorIfSet(bindings, error)  // libdbus heap-allocates the error strings; the arena won't free them
-                    // Nothing was constructed, so nothing will ever call close()
-                    // -- the arena holding the library lookup and every downcall
-                    // handle has no other owner. Release it here or a machine
-                    // with no session bus leaks it for the process lifetime.
-                    runCatching { bindings.arena.close() }
-                    return@use null
-                }
-                // From here to the constructor, a throw would strand both the
-                // connection and the arena: Notifier.create's runCatching turns
-                // it into a plain "backend unavailable" and nothing else holds
-                // a reference to either.
-                try {
-                    // Don't let a dropped session bus _exit() the host application.
-                    bindings.handle("dbus_connection_set_exit_on_disconnect")
-                        .invokeExact(conn, 0) as Unit
-
-                // Subscribe to ActionInvoked + NotificationClosed. Not fatal if
-                // it fails (we can still post fire-and-forget notifications).
-                runCatching {
-                    val rule = setup.allocateUtf8("type='signal',interface='$IFACE'")
-                    bindings.handle("dbus_bus_add_match").invokeExact(conn, rule, error) as Unit
-                }.onFailure { log.warn("AddMatch for notification signals failed: {}", it.message) }
-                freeErrorIfSet(bindings, error)  // dbus_error_free re-inits, so a later reuse stays safe
-
-                    val advertised = queryCapabilities(bindings, conn, setup, CAPABILITIES_TIMEOUT_MS)
-                    FreedesktopNotifier(
-                        bindings,
-                        conn,
-                        config,
-                        parseCapabilities(advertised),
-                        advertised?.let { CAP_BODY_MARKUP in it },
-                    )
-                } catch (t: Throwable) {
-                    log.info("notifier setup failed after connecting: {}", t.message)
-                    runCatching { bindings.handle("dbus_connection_close").invokeExact(conn) as Unit }
-                    runCatching { bindings.handle("dbus_connection_unref").invokeExact(conn) as Unit }
-                    runCatching { bindings.arena.close() }
-                    null
-                }
+            val conn = connectSession(bindings) ?: run {
+                log.info("no session bus, notifications unavailable")
+                // Nothing was constructed, so nothing will ever call close(): the
+                // arena holding the library lookup and every downcall handle has
+                // no other owner. Release it here or a machine with no session
+                // bus leaks it for the process lifetime.
+                runCatching { bindings.arena.close() }
+                return null
             }
+            // From here to the constructor, a throw would strand both the
+            // connection and the arena: Notifier.create's runCatching turns it
+            // into a plain "backend unavailable" and nothing else holds a
+            // reference to either.
+            return try {
+                val advertised = Arena.ofConfined().use { setup ->
+                    queryCapabilities(bindings, conn, setup, CAPABILITIES_TIMEOUT_MS)
+                }
+                FreedesktopNotifier(
+                    bindings,
+                    conn,
+                    config,
+                    parseCapabilities(advertised),
+                    advertised?.let { CAP_BODY_MARKUP in it },
+                )
+            } catch (t: Throwable) {
+                log.info("notifier setup failed after connecting: {}", t.message)
+                closeConnection(bindings, conn)
+                runCatching { bindings.arena.close() }
+                null
+            }
+        }
+
+        /**
+         * A new private session-bus connection, ready for this backend, or null
+         * when there is no bus to reach. Used at create time and to replace a
+         * connection whose bus went away.
+         */
+        private fun connectSession(bindings: DBusBindings): MemorySegment? = Arena.ofConfined().use { arena ->
+            val error = arena.allocate(bindings.errorLayout)
+            bindings.handle("dbus_error_init").invokeExact(error) as Unit
+            // Private, not shared: see the dbus_bus_get_private note in
+            // DBusBindings.LOAD_SET. A shared connection lets another libdbus
+            // user in the process pop our incoming messages off the single
+            // shared queue (and vice versa).
+            val conn = bindings.handle("dbus_bus_get_private")
+                .invokeExact(DBusBindings.DBUS_BUS_SESSION, error) as MemorySegment
+            if (conn.address() == 0L) {
+                // libdbus heap-allocates the error strings, the arena won't free them.
+                freeErrorIfSet(bindings, error)
+                return@use null
+            }
+            try {
+                // Don't let a dropped session bus _exit() the host application.
+                bindings.handle("dbus_connection_set_exit_on_disconnect").invokeExact(conn, 0) as Unit
+                // Subscribe to ActionInvoked + NotificationClosed. Not fatal if it
+                // fails: fire-and-forget notifications still work.
+                val rule = arena.allocateUtf8("type='signal',interface='$IFACE'")
+                bindings.handle("dbus_bus_add_match").invokeExact(conn, rule, error) as Unit
+                if ((bindings.handle("dbus_error_is_set").invokeExact(error) as Int) != 0) {
+                    log.warn("AddMatch for notification signals failed, events will not arrive")
+                    bindings.handle("dbus_error_free").invokeExact(error) as Unit
+                }
+                conn
+            } catch (t: Throwable) {
+                log.info("session bus connection setup failed: {}", t.message)
+                closeConnection(bindings, conn)
+                null
+            }
+        }
+
+        /**
+         * Private connection: close (detach from the bus, release the socket)
+         * before the final unref. A shared dbus_bus_get connection must never be
+         * closed, but this backend owns a private one.
+         */
+        private fun closeConnection(bindings: DBusBindings, conn: MemorySegment) {
+            runCatching { bindings.handle("dbus_connection_close").invokeExact(conn) as Unit }
+                .onFailure { log.warn("dbus_connection_close threw: {}", it.message) }
+            runCatching { bindings.handle("dbus_connection_unref").invokeExact(conn) as Unit }
+                .onFailure { log.warn("dbus_connection_unref threw: {}", it.message) }
         }
 
         /**

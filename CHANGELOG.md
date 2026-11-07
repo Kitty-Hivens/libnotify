@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Linux: a notifier survives a restart of the session bus. The next call opens a
+  new connection, so the host application has nothing to do. It used to stay
+  dead for good while `isOpen` kept reporting true. Notifications posted before
+  the restart belong to the old bus, so they report no more events and cannot be
+  cancelled.
 - Linux: `Notification.body` is plain text on servers that parse markup too. It
   went out verbatim, so such a server treated `report<final>.pdf` as a tag and
   dropped part of the text, and tags in third-party text reached the server as

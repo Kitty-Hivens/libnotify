@@ -102,6 +102,10 @@ internal class DBusBindings private constructor(
                 null,                                                  // void
                 listOf(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),     // conn, dbus_bool_t
             ),
+            Triple("dbus_connection_get_is_connected",
+                ValueLayout.JAVA_INT,                                  // dbus_bool_t
+                listOf(ValueLayout.ADDRESS),
+            ),
             Triple("dbus_connection_read_write",
                 ValueLayout.JAVA_INT,                                  // dbus_bool_t
                 listOf(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),     // conn, timeout_ms

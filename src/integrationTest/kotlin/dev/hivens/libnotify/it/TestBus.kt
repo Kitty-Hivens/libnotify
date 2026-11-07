@@ -25,12 +25,23 @@ internal object TestBus {
         running.waitFor(5, TimeUnit.SECONDS)
     }
 
+    /** Bring the bus back on the same address, the way a restarted session bus comes back. */
+    fun ensureRunning() {
+        address
+        if (process?.isAlive != true) launch(address)
+    }
+
     private fun start(): String {
         val address = System.getenv("DBUS_SESSION_BUS_ADDRESS").orEmpty()
         check(address.startsWith(ADDRESS_PREFIX)) {
             "Integration tests post real notifications to the session bus, so they only run on " +
                 "the private bus from `./gradlew integrationTest`. Inherited address: '$address'"
         }
+        launch(address)
+        return address
+    }
+
+    private fun launch(address: String) {
         val config = Files.createTempFile("libnotify-it-", ".conf")
         Files.writeString(
             config,
@@ -62,6 +73,5 @@ internal object TestBus {
         check(printed != null && printed.startsWith("unix:")) { "dbus-daemon did not start: $printed" }
         Files.deleteIfExists(config)
         process = daemon
-        return address
     }
 }
