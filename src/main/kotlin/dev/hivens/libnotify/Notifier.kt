@@ -12,8 +12,9 @@ import org.slf4j.LoggerFactory
  * Threading: implementations do not pin the caller to a specific thread.
  * Backend-side event dispatch runs on a thread the backend owns (a D-Bus
  * signal pump on Linux, a WinRT delegate thread on Windows, the Cocoa run loop
- * on macOS); the [onEvent] handler is invoked there. A consumer that wants to
- * touch UI state should hop itself (e.g. `withContext(Dispatchers.Main)`).
+ * on macOS), and [onEvent] listeners are invoked there. A consumer that wants to
+ * touch UI state hops to its UI thread itself, for example with
+ * `SwingUtilities.invokeLater` or a coroutine launched on `Dispatchers.Main`.
  *
  * No-throw philosophy: notifications are a non-essential UX surface. [notify]
  * returns null and [cancel] returns false on failure rather than throwing, so a
@@ -58,12 +59,11 @@ public interface Notifier : AutoCloseable {
     public fun cancel(handle: NotificationHandle): Boolean
 
     /**
-     * Subscribe to notification events. The handler runs on the backend's
-     * dispatch thread (see class KDoc), and may call [notify], [cancel] and [close]
-     * from there. The returned function unsubscribes the handler when invoked,
-     * and is idempotent.
+     * Subscribe to notification events. The listener runs on the backend's
+     * dispatch thread (see class KDoc), and may call [notify], [cancel] and
+     * [close] from there. Close the returned [Subscription] to stop delivery.
      */
-    public fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit
+    public fun onEvent(listener: NotificationListener): Subscription
 
     /**
      * Release backend resources. Cancels nothing already on screen -- shown
@@ -82,6 +82,7 @@ public interface Notifier : AutoCloseable {
          * "notifications not available here, degrade gracefully" (skip the
          * banner, don't crash).
          */
+        @JvmStatic
         public fun create(config: NotifierConfig): Notifier? {
             val osName = System.getProperty("os.name", "").lowercase()
             val backend: Notifier? = runCatching {

@@ -4,6 +4,7 @@ import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
+import dev.hivens.libnotify.NotificationListener
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch
@@ -132,19 +133,35 @@ internal class EventsIT : BusTest() {
     }
 
     @Test
-    fun `unsubscribing stops delivery, and doing it twice is harmless`() {
+    fun `closing a subscription stops delivery, and closing it twice is harmless`() {
         val server = daemon()
         val notifier = notifier()
         val gone = RecordedEvents()
-        val unsubscribe = notifier.onEvent { gone.add(it) }
+        val subscription = notifier.onEvent { gone.add(it) }
         val kept = notifier.record()
         notifier.notify(titled("t", tag = "t"))
         val id = server.awaitNotify().id
-        unsubscribe()
-        unsubscribe()
+        subscription.close()
+        subscription.close()
         server.click(id)
         kept.next() shouldBe NotificationEvent.Activated("t")
         gone.assertNone()
+    }
+
+    @Test
+    fun `closing one of two subscriptions of the same listener keeps the other`() {
+        val server = daemon()
+        val notifier = notifier()
+        val events = RecordedEvents()
+        val listener = NotificationListener { events.add(it) }
+        val first = notifier.onEvent(listener)
+        notifier.onEvent(listener)
+        first.close()
+        first.close()
+        notifier.notify(titled("t", tag = "t"))
+        server.click(server.awaitNotify().id)
+        events.next() shouldBe NotificationEvent.Activated("t")
+        events.assertNone()
     }
 
     @Test

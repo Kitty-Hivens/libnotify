@@ -30,7 +30,10 @@ package dev.hivens.libnotify
  * @property closeEvents Whether [NotificationEvent.Dismissed] is emitted.
  * @property urgency Whether [Urgency] changes presentation.
  */
-public data class NotifierCapabilities(
+// Only the library constructs this, so a new capability is a new property and
+// breaks nobody: the constructor and copy stay internal.
+@ConsistentCopyVisibility
+public data class NotifierCapabilities internal constructor(
     val actions: Boolean,
     val maxActions: Int,
     val bodyMarkup: Boolean,

@@ -37,6 +37,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   paths, so nothing would ever have called `close()`.
 
 ### Changed
+- Breaking: `Notification` and `NotifierConfig` are plain classes instead of data
+  classes, so a new property no longer breaks binary compatibility. `copy` and the
+  `componentN` functions are gone. `toBuilder()` replaces `copy`, and each class
+  has a `Builder` for Java callers.
+- Breaking: `Notifier.onEvent` takes a `NotificationListener` and returns a
+  `Subscription` to close, instead of Kotlin function types. Kotlin lambdas still
+  convert. Closing a subscription removes that registration only, so a listener
+  registered twice keeps its other registration.
+- Breaking: `NotifierCapabilities` can no longer be constructed or copied outside
+  the library. Reading it is unchanged.
+- `Notifier.create` is a static method for Java callers, and the empty
+  `NotificationAction.Companion` is gone.
+- The `appId` KDoc says what Linux does with it: it goes out as the
+  `desktop-entry` hint. It said the opposite.
 - `SmokeMain` moved into the test source set so it no longer ships in the
   published library jar. It was packaged in 0.1.0 through 0.1.2, so the next
   release drops `dev.hivens.libnotify.SmokeMainKt` from the artifact -- it was

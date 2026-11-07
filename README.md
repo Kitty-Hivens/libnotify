@@ -98,6 +98,28 @@ handle?.let { notifier.cancel(it) }
 notifier.close()
 ```
 
+The same from Java:
+
+```java
+NotifierConfig config = new NotifierConfig.Builder("MyApp").appId("com.example.MyApp").build();
+try (Notifier notifier = Notifier.create(config)) {
+    if (notifier == null) return;  // notifications not available here
+    try (Subscription events = notifier.onEvent(event -> {
+        if (event instanceof NotificationEvent.ActionInvoked invoked) handle(invoked.getActionId());
+    })) {
+        notifier.notify(new Notification.Builder("Download finished")
+                .body("myapp-1.4.0.zip is ready.")
+                .actions(List.of(new NotificationAction("open", "Open")))
+                .tag("download-myapp-140")
+                .build());
+    }
+}
+```
+
+`appId` doubles as the Windows AUMID and the Linux `desktop-entry` hint, which
+notification servers group by. A reverse-DNS id that matches your `.desktop`
+file name serves both.
+
 Read [`NotifierCapabilities`](src/main/kotlin/dev/hivens/libnotify/NotifierCapabilities.kt)
 (`notifier.capabilities`) to adapt before posting -- on Linux it reflects the
 running daemon's `GetCapabilities`, on Windows and macOS it is fixed. A backend

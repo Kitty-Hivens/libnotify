@@ -11,17 +11,6 @@ public final class dev/hivens/libnotify/DismissReason : java/lang/Enum {
 public final class dev/hivens/libnotify/Notification {
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ldev/hivens/libnotify/Urgency;Ldev/hivens/libnotify/Timeout;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;)V
 	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ldev/hivens/libnotify/Urgency;Ldev/hivens/libnotify/Timeout;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun component2 ()Ljava/lang/String;
-	public final fun component3 ()[B
-	public final fun component4 ()Ljava/lang/String;
-	public final fun component5 ()Ldev/hivens/libnotify/Urgency;
-	public final fun component6 ()Ldev/hivens/libnotify/Timeout;
-	public final fun component7 ()Ljava/util/List;
-	public final fun component8 ()Ljava/lang/String;
-	public final fun component9 ()Ljava/lang/String;
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ldev/hivens/libnotify/Urgency;Ldev/hivens/libnotify/Timeout;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;)Ldev/hivens/libnotify/Notification;
-	public static synthetic fun copy$default (Ldev/hivens/libnotify/Notification;Ljava/lang/String;Ljava/lang/String;[BLjava/lang/String;Ldev/hivens/libnotify/Urgency;Ldev/hivens/libnotify/Timeout;Ljava/util/List;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ldev/hivens/libnotify/Notification;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getActions ()Ljava/util/List;
 	public final fun getBody ()Ljava/lang/String;
@@ -33,11 +22,25 @@ public final class dev/hivens/libnotify/Notification {
 	public final fun getTitle ()Ljava/lang/String;
 	public final fun getUrgency ()Ldev/hivens/libnotify/Urgency;
 	public fun hashCode ()I
+	public final fun toBuilder ()Ldev/hivens/libnotify/Notification$Builder;
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class dev/hivens/libnotify/Notification$Builder {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun actions (Ljava/util/List;)Ldev/hivens/libnotify/Notification$Builder;
+	public final fun body (Ljava/lang/String;)Ldev/hivens/libnotify/Notification$Builder;
+	public final fun build ()Ldev/hivens/libnotify/Notification;
+	public final fun category (Ljava/lang/String;)Ldev/hivens/libnotify/Notification$Builder;
+	public final fun iconBytes ([B)Ldev/hivens/libnotify/Notification$Builder;
+	public final fun iconName (Ljava/lang/String;)Ldev/hivens/libnotify/Notification$Builder;
+	public final fun tag (Ljava/lang/String;)Ldev/hivens/libnotify/Notification$Builder;
+	public final fun timeout (Ldev/hivens/libnotify/Timeout;)Ldev/hivens/libnotify/Notification$Builder;
+	public final fun title (Ljava/lang/String;)Ldev/hivens/libnotify/Notification$Builder;
+	public final fun urgency (Ldev/hivens/libnotify/Urgency;)Ldev/hivens/libnotify/Notification$Builder;
+}
+
 public final class dev/hivens/libnotify/NotificationAction {
-	public static final field Companion Ldev/hivens/libnotify/NotificationAction$Companion;
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
 	public final fun component1 ()Ljava/lang/String;
 	public final fun component2 ()Ljava/lang/String;
@@ -48,9 +51,6 @@ public final class dev/hivens/libnotify/NotificationAction {
 	public final fun getLabel ()Ljava/lang/String;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
-}
-
-public final class dev/hivens/libnotify/NotificationAction$Companion {
 }
 
 public abstract interface class dev/hivens/libnotify/NotificationEvent {
@@ -102,14 +102,19 @@ public final class dev/hivens/libnotify/NotificationHandle {
 	public fun toString ()Ljava/lang/String;
 }
 
+public abstract interface class dev/hivens/libnotify/NotificationListener {
+	public abstract fun onEvent (Ldev/hivens/libnotify/NotificationEvent;)V
+}
+
 public abstract interface class dev/hivens/libnotify/Notifier : java/lang/AutoCloseable {
 	public static final field Companion Ldev/hivens/libnotify/Notifier$Companion;
 	public abstract fun cancel (Ldev/hivens/libnotify/NotificationHandle;)Z
 	public abstract fun close ()V
+	public static fun create (Ldev/hivens/libnotify/NotifierConfig;)Ldev/hivens/libnotify/Notifier;
 	public abstract fun getCapabilities ()Ldev/hivens/libnotify/NotifierCapabilities;
 	public abstract fun isOpen ()Z
 	public abstract fun notify (Ldev/hivens/libnotify/Notification;)Ldev/hivens/libnotify/NotificationHandle;
-	public abstract fun onEvent (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function0;
+	public abstract fun onEvent (Ldev/hivens/libnotify/NotificationListener;)Ldev/hivens/libnotify/Subscription;
 }
 
 public final class dev/hivens/libnotify/Notifier$Companion {
@@ -117,7 +122,6 @@ public final class dev/hivens/libnotify/Notifier$Companion {
 }
 
 public final class dev/hivens/libnotify/NotifierCapabilities {
-	public fun <init> (ZIZZZZZ)V
 	public final fun component1 ()Z
 	public final fun component2 ()I
 	public final fun component3 ()Z
@@ -125,8 +129,6 @@ public final class dev/hivens/libnotify/NotifierCapabilities {
 	public final fun component5 ()Z
 	public final fun component6 ()Z
 	public final fun component7 ()Z
-	public final fun copy (ZIZZZZZ)Ldev/hivens/libnotify/NotifierCapabilities;
-	public static synthetic fun copy$default (Ldev/hivens/libnotify/NotifierCapabilities;ZIZZZZZILjava/lang/Object;)Ldev/hivens/libnotify/NotifierCapabilities;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getActions ()Z
 	public final fun getBodyMarkup ()Z
@@ -142,19 +144,27 @@ public final class dev/hivens/libnotify/NotifierCapabilities {
 public final class dev/hivens/libnotify/NotifierConfig {
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)V
 	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[BILkotlin/jvm/internal/DefaultConstructorMarker;)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun component2 ()Ljava/lang/String;
-	public final fun component3 ()Ljava/lang/String;
-	public final fun component4 ()[B
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[B)Ldev/hivens/libnotify/NotifierConfig;
-	public static synthetic fun copy$default (Ldev/hivens/libnotify/NotifierConfig;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[BILjava/lang/Object;)Ldev/hivens/libnotify/NotifierConfig;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getAppId ()Ljava/lang/String;
 	public final fun getAppName ()Ljava/lang/String;
 	public final fun getDefaultIconBytes ()[B
 	public final fun getDefaultIconName ()Ljava/lang/String;
 	public fun hashCode ()I
+	public final fun toBuilder ()Ldev/hivens/libnotify/NotifierConfig$Builder;
 	public fun toString ()Ljava/lang/String;
+}
+
+public final class dev/hivens/libnotify/NotifierConfig$Builder {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun appId (Ljava/lang/String;)Ldev/hivens/libnotify/NotifierConfig$Builder;
+	public final fun appName (Ljava/lang/String;)Ldev/hivens/libnotify/NotifierConfig$Builder;
+	public final fun build ()Ldev/hivens/libnotify/NotifierConfig;
+	public final fun defaultIconBytes ([B)Ldev/hivens/libnotify/NotifierConfig$Builder;
+	public final fun defaultIconName (Ljava/lang/String;)Ldev/hivens/libnotify/NotifierConfig$Builder;
+}
+
+public abstract interface class dev/hivens/libnotify/Subscription : java/lang/AutoCloseable {
+	public abstract fun close ()V
 }
 
 public abstract interface class dev/hivens/libnotify/Timeout {

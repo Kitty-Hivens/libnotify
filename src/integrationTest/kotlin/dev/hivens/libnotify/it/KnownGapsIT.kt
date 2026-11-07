@@ -2,7 +2,6 @@ package dev.hivens.libnotify.it
 
 import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.Notification
-import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotifierConfig
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
@@ -100,13 +99,6 @@ internal class KnownGapsIT : BusTest() {
     }
 
     @Test
-    fun `app id stays off the wire as its KDoc promises`() = knownGap("KDoc says ignored on Linux, the code sends desktop-entry") {
-        val server = daemon()
-        notifier(NotifierConfig(appName = "a", appId = "Some.Aumid")).notify(titled("t"))
-        server.awaitNotify().hints.containsKey("desktop-entry") shouldBe false
-    }
-
-    @Test
     fun `a user tag cannot collide with a generated id`() = knownGap("generated ids are predictable") {
         val server = daemon()
         val notifier = notifier()
@@ -122,20 +114,5 @@ internal class KnownGapsIT : BusTest() {
         val first = notifier().notify(titled("t"))
         val second = notifier().notify(titled("t"))
         first?.id shouldNotBe second?.id
-    }
-
-    @Test
-    fun `unsubscribing twice does not remove a second subscription of the same handler`() = knownGap("unsubscribe removes by equality") {
-        val server = daemon()
-        val notifier = notifier()
-        val events = RecordedEvents()
-        val handler: (NotificationEvent) -> Unit = { events.add(it) }
-        val unsubscribeFirst = notifier.onEvent(handler)
-        notifier.onEvent(handler)
-        unsubscribeFirst()
-        unsubscribeFirst()
-        notifier.notify(titled("t", tag = "t"))
-        server.click(server.awaitNotify().id)
-        events.next(1_000) shouldBe NotificationEvent.Activated("t")
     }
 }

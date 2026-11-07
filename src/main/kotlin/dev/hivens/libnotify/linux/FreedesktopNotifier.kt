@@ -1,21 +1,23 @@
 package dev.hivens.libnotify.linux
 
+import dev.hivens.libnotify.DEFAULT_ACTION_ID
 import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.DispatchCalls
+import dev.hivens.libnotify.EventListeners
 import dev.hivens.libnotify.Notification
-import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationHandle
+import dev.hivens.libnotify.NotificationListener
 import dev.hivens.libnotify.Notifier
 import dev.hivens.libnotify.NotifierCapabilities
 import dev.hivens.libnotify.NotifierConfig
+import dev.hivens.libnotify.Subscription
 import dev.hivens.libnotify.Timeout
 import dev.hivens.libnotify.Urgency
 import org.slf4j.LoggerFactory
 import java.io.ByteArrayInputStream
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.imageio.ImageIO
 
@@ -49,7 +51,7 @@ internal class FreedesktopNotifier private constructor(
     private val log = LoggerFactory.getLogger("libnotify.Freedesktop")
 
     private val open = AtomicBoolean(true)
-    private val handlers = CopyOnWriteArrayList<(NotificationEvent) -> Unit>()
+    private val listeners = EventListeners(log)
 
     /** Work from [notify] / [cancel], run on the [dispatchThread]. */
     private val calls = DispatchCalls(log)
@@ -86,10 +88,7 @@ internal class FreedesktopNotifier private constructor(
         return calls.call("CloseNotification", false, QUEUE_WAIT_MS, WORK_CAP_MS) { doCancel(handle) }
     }
 
-    override fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit {
-        handlers.add(handler)
-        return { handlers.remove(handler) }
-    }
+    override fun onEvent(listener: NotificationListener): Subscription = listeners.add(listener)
 
     override fun close() {
         if (!open.compareAndSet(true, false)) return
@@ -192,7 +191,7 @@ internal class FreedesktopNotifier private constructor(
                 val actSig = call.allocateUtf8("s")
                 val actArr = call.allocate(bindings.messageIterLayout)
                 bindings.openContainer(iter, DBusBindings.DBUS_TYPE_ARRAY, actSig, actArr)
-                bindings.appendString(call, actArr, DBusBindings.DBUS_TYPE_STRING, NotificationAction.DEFAULT_ID)
+                bindings.appendString(call, actArr, DBusBindings.DBUS_TYPE_STRING, DEFAULT_ACTION_ID)
                 bindings.appendString(call, actArr, DBusBindings.DBUS_TYPE_STRING, "")
                 for (a in n.actions) {
                     bindings.appendString(call, actArr, DBusBindings.DBUS_TYPE_STRING, a.id)
@@ -300,7 +299,7 @@ internal class FreedesktopNotifier private constructor(
                     bindings.handle("dbus_message_iter_next").invokeExact(iter) as Int
                     val key = bindings.readString(call, iter) ?: return
                     val publicId = serverToPublic[serverId.toLong() and 0xFFFF_FFFFL] ?: return
-                    if (key == NotificationAction.DEFAULT_ID) {
+                    if (key == DEFAULT_ACTION_ID) {
                         fire(NotificationEvent.Activated(publicId))
                     } else {
                         fire(NotificationEvent.ActionInvoked(publicId, key))
@@ -320,11 +319,7 @@ internal class FreedesktopNotifier private constructor(
         }
     }
 
-    private fun fire(event: NotificationEvent) {
-        for (h in handlers) {
-            runCatching { h(event) }.onFailure { log.warn("onEvent handler threw: {}", it.message) }
-        }
-    }
+    private fun fire(event: NotificationEvent) = listeners.fire(event)
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 

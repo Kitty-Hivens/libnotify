@@ -2,6 +2,7 @@ package dev.hivens.libnotify
 
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.string.shouldContain
 import org.junit.jupiter.api.Test
 
 /**
@@ -57,7 +58,7 @@ class NotificationModelTest {
 
     @Test
     fun `NotificationAction rejects the reserved default id`() {
-        shouldThrow<IllegalArgumentException> { NotificationAction(NotificationAction.DEFAULT_ID, "Open") }
+        shouldThrow<IllegalArgumentException> { NotificationAction(DEFAULT_ACTION_ID, "Open") }
     }
 
     @Test
@@ -75,6 +76,50 @@ class NotificationModelTest {
     @Test
     fun `NotifierConfig rejects a blank app name`() {
         shouldThrow<IllegalArgumentException> { NotifierConfig(appName = " ") }
+    }
+
+    @Test
+    fun `a Notification survives a round trip through its builder`() {
+        val original = Notification(
+            title = "t",
+            body = "b",
+            iconBytes = byteArrayOf(1),
+            iconName = "i",
+            urgency = Urgency.CRITICAL,
+            timeout = Timeout.After(1_000),
+            actions = listOf(NotificationAction("a", "A")),
+            category = "c",
+            tag = "g",
+        )
+        original.toBuilder().build() shouldBe original
+        original.toBuilder().title("changed").build().title shouldBe "changed"
+    }
+
+    @Test
+    fun `the Notification builder checks like the constructor`() {
+        shouldThrow<IllegalArgumentException> { Notification.Builder(" ").build() }
+        shouldThrow<IllegalArgumentException> { Notification.Builder("t").tag("").build() }
+    }
+
+    @Test
+    fun `the Notification builder copies the action list it is given`() {
+        val actions = mutableListOf(NotificationAction("a", "A"))
+        val built = Notification.Builder("t").actions(actions).build()
+        actions.add(NotificationAction("b", "B"))
+        built.actions.size shouldBe 1
+    }
+
+    @Test
+    fun `a NotifierConfig survives a round trip through its builder`() {
+        val original = NotifierConfig("App", "com.example.App", "icon", byteArrayOf(1))
+        original.toBuilder().build() shouldBe original
+        NotifierConfig.Builder("App").appId("x").build().appId shouldBe "x"
+    }
+
+    @Test
+    fun `toString shows icon sizes, not array identities`() {
+        Notification(title = "t", iconBytes = byteArrayOf(1, 2)).toString() shouldContain "iconBytes=2 bytes"
+        NotifierConfig(appName = "a", defaultIconBytes = byteArrayOf(1)).toString() shouldContain "defaultIconBytes=1 bytes"
     }
 
     @Test

@@ -1,7 +1,7 @@
 package dev.hivens.libnotify.windows
 
+import dev.hivens.libnotify.DEFAULT_ACTION_ID
 import dev.hivens.libnotify.Notification
-import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.Timeout
 import dev.hivens.libnotify.Urgency
 
@@ -13,7 +13,7 @@ import dev.hivens.libnotify.Urgency
  *
  * The `launch` attribute and each `<action arguments>` carry the routing key
  * the activation handler reads back: a body click activates with the reserved
- * [NotificationAction.DEFAULT_ID]; an action button activates with that
+ * [DEFAULT_ACTION_ID]; an action button activates with that
  * action's id.
  */
 internal object ToastXml {
@@ -31,7 +31,7 @@ internal object ToastXml {
         sb.append("<toast")
         scenarioFor(n.urgency)?.let { sb.append(" scenario=\"").append(it).append('"') }
         durationFor(n.timeout)?.let { sb.append(" duration=\"").append(it).append('"') }
-        sb.append(" launch=\"").append(escape(NotificationAction.DEFAULT_ID)).append('"')
+        sb.append(" launch=\"").append(escape(DEFAULT_ACTION_ID)).append('"')
         sb.append(" activationType=\"foreground\">")
 
         sb.append("<visual><binding template=\"ToastGeneric\">")

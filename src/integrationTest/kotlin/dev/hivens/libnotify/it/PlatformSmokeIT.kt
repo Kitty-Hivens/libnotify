@@ -47,7 +47,7 @@ internal class PlatformSmokeIT {
             elapsedMillis { first = it.notify(notification) } shouldBeLessThan 15_000L
             println("notify: $first")
             var replaced: Any? = null
-            elapsedMillis { replaced = it.notify(notification.copy(title = "libnotify CI, replaced")) } shouldBeLessThan 15_000L
+            elapsedMillis { replaced = it.notify(notification.toBuilder().title("libnotify CI, replaced").build()) } shouldBeLessThan 15_000L
             println("notify again with the same tag: $replaced")
             val handle = it.notify(titled("libnotify CI, to cancel"))
             println("notify untagged: $handle")

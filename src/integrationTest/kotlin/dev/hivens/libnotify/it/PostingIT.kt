@@ -44,6 +44,21 @@ internal class PostingIT : BusTest() {
     }
 
     @Test
+    fun `the app id goes out as the desktop entry, which servers group by`() {
+        val server = daemon()
+        val notifier = notifier(NotifierConfig(appName = "a", appId = "com.example.App"))
+        notifier.notify(titled("t"))
+        server.awaitNotify().hints["desktop-entry"] shouldBe "com.example.App"
+    }
+
+    @Test
+    fun `no app id sends no desktop entry`() {
+        val server = daemon()
+        notifier().notify(titled("t"))
+        server.awaitNotify().hints.containsKey("desktop-entry") shouldBe false
+    }
+
+    @Test
     fun `untagged posts get distinct ids and do not replace each other`() {
         val server = daemon()
         val notifier = notifier()

@@ -1,14 +1,17 @@
 package dev.hivens.libnotify.windows
 
+import dev.hivens.libnotify.DEFAULT_ACTION_ID
 import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.DispatchCalls
+import dev.hivens.libnotify.EventListeners
 import dev.hivens.libnotify.Notification
-import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationHandle
+import dev.hivens.libnotify.NotificationListener
 import dev.hivens.libnotify.Notifier
 import dev.hivens.libnotify.NotifierCapabilities
 import dev.hivens.libnotify.NotifierConfig
+import dev.hivens.libnotify.Subscription
 import org.slf4j.LoggerFactory
 import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
@@ -19,7 +22,6 @@ import java.lang.invoke.MethodType
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -63,7 +65,7 @@ internal class ToastNotifier private constructor(
     private val log = LoggerFactory.getLogger("libnotify.Toast")
 
     private val open = AtomicBoolean(true)
-    private val handlers = CopyOnWriteArrayList<(NotificationEvent) -> Unit>()
+    private val listeners = EventListeners(log)
     private val calls = DispatchCalls(log)
 
     // Written by the dispatch thread at startup, read by it thereafter.
@@ -100,10 +102,7 @@ internal class ToastNotifier private constructor(
         return calls.call("Toast hide", false, QUEUE_WAIT_MS, WORK_CAP_MS) { doCancel(handle) }
     }
 
-    override fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit {
-        handlers.add(handler)
-        return { handlers.remove(handler) }
-    }
+    override fun onEvent(listener: NotificationListener): Subscription = listeners.add(listener)
 
     override fun close() {
         if (!open.compareAndSet(true, false)) return
@@ -320,8 +319,8 @@ internal class ToastNotifier private constructor(
     // ── Called from the static Invoke upcalls (system callback thread) ────────
 
     private fun onActivated(publicId: String, arguments: String?) {
-        val arg = arguments?.takeIf { it.isNotBlank() } ?: NotificationAction.DEFAULT_ID
-        if (arg == NotificationAction.DEFAULT_ID) {
+        val arg = arguments?.takeIf { it.isNotBlank() } ?: DEFAULT_ACTION_ID
+        if (arg == DEFAULT_ACTION_ID) {
             fire(NotificationEvent.Activated(publicId))
         } else {
             fire(NotificationEvent.ActionInvoked(publicId, arg))
@@ -335,11 +334,7 @@ internal class ToastNotifier private constructor(
         calls.post("Toast release") { deliveredToasts.remove(publicId)?.let { bindings.release(it) } }
     }
 
-    private fun fire(event: NotificationEvent) {
-        for (h in handlers) {
-            runCatching { h(event) }.onFailure { log.warn("onEvent handler threw: {}", it.message) }
-        }
-    }
+    private fun fire(event: NotificationEvent) = listeners.fire(event)
 
     private fun nextAnonId(): String = "ln-${anonCounter.getAndIncrement()}"
 

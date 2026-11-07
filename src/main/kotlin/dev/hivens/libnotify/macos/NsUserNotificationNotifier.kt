@@ -1,11 +1,14 @@
 package dev.hivens.libnotify.macos
 
+import dev.hivens.libnotify.EventListeners
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationHandle
+import dev.hivens.libnotify.NotificationListener
 import dev.hivens.libnotify.Notifier
 import dev.hivens.libnotify.NotifierCapabilities
 import dev.hivens.libnotify.NotifierConfig
+import dev.hivens.libnotify.Subscription
 import org.slf4j.LoggerFactory
 import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
@@ -52,7 +55,7 @@ internal class NsUserNotificationNotifier private constructor(
     private val log = LoggerFactory.getLogger("libnotify.NSUserNotification")
 
     private val open = AtomicBoolean(true)
-    private val handlers = CopyOnWriteArrayList<(NotificationEvent) -> Unit>()
+    private val listeners = EventListeners(log)
 
     // Concurrent because the activation delegate ([handleActivation]) reads these
     // on the Cocoa main thread while notify/cancel/close mutate them under
@@ -78,10 +81,7 @@ internal class NsUserNotificationNotifier private constructor(
             .getOrElse { log.warn("cancel threw: {}", it.message); false }
     }
 
-    override fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit {
-        handlers.add(handler)
-        return { handlers.remove(handler) }
-    }
+    override fun onEvent(listener: NotificationListener): Subscription = listeners.add(listener)
 
     override fun close() {
         if (!open.compareAndSet(true, false)) return
@@ -217,11 +217,7 @@ internal class NsUserNotificationNotifier private constructor(
         }
     }
 
-    private fun fire(event: NotificationEvent) {
-        for (h in handlers) {
-            runCatching { h(event) }.onFailure { log.warn("onEvent handler threw: {}", it.message) }
-        }
-    }
+    private fun fire(event: NotificationEvent) = listeners.fire(event)
 
     // ── msgSend conveniences ─────────────────────────────────────────────────
 
