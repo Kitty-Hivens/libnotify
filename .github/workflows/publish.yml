@@ -66,6 +66,10 @@ jobs:
           fi
           echo "publishing $v"
 
+      # The integration suite starts its own private bus.
+      - name: Install dbus-daemon
+        run: command -v dbus-daemon || (sudo apt-get update && sudo apt-get install -y dbus)
+
       # The tag is what ships, so it is tested here rather than on the trust
       # that main was green when it was cut.
       - name: Build + test

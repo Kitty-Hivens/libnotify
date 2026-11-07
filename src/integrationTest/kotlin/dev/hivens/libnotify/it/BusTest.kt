@@ -6,8 +6,8 @@ import dev.hivens.libnotify.Notifier
 import dev.hivens.libnotify.NotifierConfig
 import io.kotest.assertions.fail
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
-import org.junit.jupiter.api.condition.EnabledOnOs
 import org.junit.jupiter.api.condition.OS
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
@@ -15,14 +15,18 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.imageio.ImageIO
 
-/** Starts the private bus first and closes whatever a test opened. */
-@EnabledOnOs(OS.LINUX)
+/**
+ * Starts the private bus first and closes whatever a test opened. Skipped off
+ * Linux by an assumption rather than a class annotation, which a subclass would
+ * not be guaranteed to inherit.
+ */
 internal abstract class BusTest {
     private val daemons = ArrayList<FakeDaemon>()
     private val notifiers = ArrayList<Notifier>()
 
     @BeforeEach
     fun requirePrivateBus() {
+        assumeTrue(OS.current() == OS.LINUX, "the freedesktop backend only runs on Linux")
         TestBus.address
     }
 
