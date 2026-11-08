@@ -12,4 +12,5 @@ before_install:
 install:
   - source "$HOME/.sdkman/bin/sdkman-init.sh"
   - sdk use java 22.0.2-tem
-  - ./gradlew clean publishToMavenLocal -x test
+  # JitPack holds no signing key, and signing runs for every repository.
+  - ./gradlew clean publishToMavenLocal -x test -PskipSigning

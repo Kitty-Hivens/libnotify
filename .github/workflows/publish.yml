@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 0.1.2"
+        description: "Version to publish, e.g. 0.1.2. Run it from that version's tag."
         required: true
 
 env:
@@ -24,13 +24,16 @@ jobs:
     name: Publish to Maven Central
     runs-on: ubuntu-latest
     environment: maven-central
+    # Pinned to commits, not tags: this job holds the signing key and the
+    # Central token, and a tag can be moved to code nobody reviewed. Dependabot
+    # updates the pins and the version comments together.
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: ${{ env.JAVA_DISTRIBUTION }}
           java-version: ${{ env.JAVA_VERSION }}
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
 
       - name: Resolve the version
         id: version
@@ -39,10 +42,20 @@ jobs:
           # path has already stripped the v.
           INPUT_VERSION: ${{ inputs.version }}
         run: |
+          # Only a tag ships, whichever way the run started: a dispatch from a
+          # branch would publish code no tag records.
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::publish runs from a tag, this run is on $GITHUB_REF_TYPE '$GITHUB_REF_NAME'"
+            exit 1
+          fi
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             v="${GITHUB_REF_NAME#v}"
           else
             v="${INPUT_VERSION#v}"
+            if [ "$v" != "${GITHUB_REF_NAME#v}" ]; then
+              echo "::error::version '$v' does not match the tag '$GITHUB_REF_NAME' this run is on"
+              exit 1
+            fi
           fi
           case "$v" in
             [0-9]*) ;;

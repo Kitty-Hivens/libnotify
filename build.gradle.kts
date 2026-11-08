@@ -83,6 +83,12 @@ kotlin {
         // (Configured via the `kotlin { explicitApi() }` call below.)
         freeCompilerArgs.addAll(
             "-jvm-default=enable",  // Generate Java 8+ default methods for interface APIs.
+            // Not -Xjdk-release=22, though it would pin Kotlin to the JDK 22 class
+            // library. With it the compiler loses the polymorphic signature of
+            // MethodHandle.invokeExact and emits a plain varargs call, so every
+            // native call in this library fails at run time with
+            // WrongMethodTypeException. CI compiles on JDK 22, which is where the
+            // floor the README promises is enforced.
         )
         // Every warning is an error. Warnings pile up unseen behind the
         // build cache (a cached compile replays without re-emitting them);
@@ -100,6 +106,67 @@ kotlin {
 
 tasks.named("check") {
     dependsOn("checkKotlinAbi")
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.release.set(22)
+}
+
+// How many tests ran, printed on every run, with a ceiling on how many may skip
+// and a floor on how many must run. Without it a suite that skipped itself into
+// silence looks exactly like one that passed: Gradle prints totals only when
+// something fails. The integration suite skips on purpose where its platform is
+// not the host's, so its limits depend on where it runs:
+//   - Linux runs everything but PlatformSmokeIT, hence one allowed skip.
+//   - Windows and macOS run only PlatformSmokeIT, and only on CI, so there the
+//     floor is what catches the smoke test skipping itself.
+// Raise a limit deliberately with -PmaxSkippedTests when a gap is real.
+val hostIsLinux = System.getProperty("os.name").lowercase().contains("linux")
+val onCi = providers.environmentVariable("CI").orNull == "true"
+tasks.withType<Test>().configureEach {
+    val integration = name == "integrationTest"
+    val maxSkipped = providers.gradleProperty("maxSkippedTests").map { it.toInt() }.getOrElse(
+        when {
+            !integration -> 0
+            hostIsLinux -> 1
+            else -> Int.MAX_VALUE
+        },
+    )
+    val minRan = if (integration && !hostIsLinux && onCi) 1 else 0
+    // Inputs, because they decide whether the task passes and Gradle keys its
+    // cache on inputs alone: a lowered ceiling must not be served an old green.
+    inputs.property("libnotifyMaxSkipped", maxSkipped)
+    inputs.property("libnotifyMinRan", minRan)
+    val xmlDir = reports.junitXml.outputLocation
+    val label = path
+    doLast {
+        var total = 0
+        var skipped = 0
+        val names = mutableListOf<String>()
+        val head = Regex("<testsuite\\b[^>]*")
+        val skippedCase = Regex("<testcase name=\"([^\"]*)\" classname=\"([^\"]*)\"[^>]*>\\s*<skipped")
+        fun count(text: String, attribute: String): Int =
+            Regex("\\b$attribute=\"(\\d+)\"").find(text)?.groupValues?.get(1)?.toInt() ?: 0
+        for (f in xmlDir.get().asFile.listFiles().orEmpty()) {
+            if (!f.name.endsWith(".xml")) continue
+            val text = f.readText()
+            val suite = head.find(text) ?: continue
+            total += count(suite.value, "tests")
+            skipped += count(suite.value, "skipped")
+            for (m in skippedCase.findAll(text)) {
+                names += m.groupValues[2].substringAfterLast('.') + " > " + m.groupValues[1]
+            }
+        }
+        val ran = total - skipped
+        logger.lifecycle("$label: $ran of $total tests ran, $skipped skipped")
+        if (skipped > maxSkipped || ran < minRan) {
+            throw GradleException(
+                "$label ran $ran and skipped $skipped tests, outside the limits of at most $maxSkipped " +
+                    "skipped and at least $minRan run. Something the suite needs is missing rather than " +
+                    "the suite passing.\n" + names.sorted().joinToString("\n") { "  $it" },
+            )
+        }
+    }
 }
 
 dependencies {
@@ -192,7 +259,11 @@ tasks.withType<Jar>().configureEach {
 // leaving it VALIDATED in the portal waiting for a manual Publish click.
 mavenPublishing {
     publishToMavenCentral(automaticRelease = true)
-    signAllPublications()
+    // -PskipSigning is for publishing to mavenLocal or from JitPack, where no
+    // key is unlocked and signing, which runs for every repository, would stop
+    // the publish outright. Central refuses an unsigned upload, so the switch
+    // cannot ship anything unsigned.
+    if (!providers.gradleProperty("skipSigning").isPresent) signAllPublications()
     coordinates("dev.hivens", "libnotify", project.version.toString())
     pom {
         name.set("libnotify")
