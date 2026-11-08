@@ -12,8 +12,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to publish, e.g. 0.1.2. Run it from that version's tag."
-        required: true
+        description: "Version to publish, e.g. 0.1.2. Run it from that version's tag. Ignored by a dry run."
+        required: false
+      dry_run:
+        description: "Build, test and sign with the CI key, publish nowhere. Runs from any ref."
+        type: boolean
+        default: false
 
 env:
   JAVA_VERSION: '22'
@@ -41,7 +45,13 @@ jobs:
           # A dispatched run is where "v0.1.2" gets pasted in by hand; the tag
           # path has already stripped the v.
           INPUT_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
+          # A dry run ships nothing, so it needs no tag and no real version.
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "v=0.0.0-signing-check" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Only a tag ships, whichever way the run started: a dispatch from a
           # branch would publish code no tag records.
           if [ "$GITHUB_REF_TYPE" != "tag" ]; then
@@ -69,6 +79,7 @@ jobs:
       # Central versions are immutable, and a reused one is rejected only at
       # the end of the upload -- after everything has been built and signed.
       - name: Guard the version
+        if: ${{ inputs.dry_run != true }}
         env:
           VERSION: ${{ steps.version.outputs.v }}
         run: |
@@ -88,7 +99,33 @@ jobs:
       - name: Build + test
         run: ./gradlew build --stacktrace
 
+      # The signing path a release takes, short of the upload: the in-memory
+      # key reaches the build exactly as it does on a tag, and the signatures
+      # land in the runner's local repository. Only the signing secrets are
+      # handed over, the Central token stays out of a run that uploads nothing.
+      - name: Sign without publishing
+        if: ${{ inputs.dry_run == true }}
+        env:
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+          VERSION: ${{ steps.version.outputs.v }}
+        run: |
+          ./gradlew publishToMavenLocal \
+            -PappVersion="$VERSION" \
+            --no-configuration-cache
+          dir="$HOME/.m2/repository/dev/hivens/libnotify/$VERSION"
+          ls -l "$dir"
+          for f in "$dir"/*.jar "$dir"/*.pom "$dir"/*.module; do
+            if [ ! -s "$f.asc" ]; then
+              echo "::error::no signature for $(basename "$f")"
+              exit 1
+            fi
+          done
+          # Which key signed, read off the signature packet: needs no key at all.
+          gpg --list-packets "$dir/libnotify-$VERSION.pom.asc" | grep -iE 'signature packet|keyid'
+
       - name: Publish
+        if: ${{ inputs.dry_run != true }}
         env:
           ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
