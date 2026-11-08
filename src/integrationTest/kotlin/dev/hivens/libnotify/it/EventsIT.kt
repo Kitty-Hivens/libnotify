@@ -4,13 +4,18 @@ import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.NotificationAction
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
+import dev.hivens.libnotify.NotificationHandle
 import dev.hivens.libnotify.NotificationListener
 import io.kotest.matchers.comparables.shouldBeLessThan
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
+import io.kotest.matchers.string.shouldStartWith
 import org.junit.jupiter.api.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /** What signals from the server turn into. */
 internal class EventsIT : BusTest() {
@@ -203,6 +208,58 @@ internal class EventsIT : BusTest() {
         secondEvents.next() shouldBe NotificationEvent.Activated("two")
         server.click(firstId)
         firstEvents.next() shouldBe NotificationEvent.Activated("one")
+    }
+
+    @Test
+    fun `every event of a notifier arrives on one thread of its own, whoever caused it`() {
+        val server = daemon()
+        val notifier = notifier()
+        val threads = mutableListOf<Thread>()
+        val events = RecordedEvents()
+        notifier.onEvent {
+            threads.add(Thread.currentThread())
+            events.add(it)
+        }
+        val clicked = notifier.notify(titled("clicked", tag = "clicked"))!!
+        server.click(server.awaitNotify().id)
+        events.next() shouldBe NotificationEvent.Activated(clicked.id)
+        notifier.notify(titled("expired", tag = "expired"))!!
+        server.closed(server.awaitNotify().id, 1)
+        events.next() shouldBe NotificationEvent.Dismissed("expired", DismissReason.EXPIRED)
+        // The caller's own cancel still reports on the notifier's thread.
+        val cancelled = notifier.notify(titled("cancelled", tag = "cancelled"))!!
+        server.awaitNotify()
+        notifier.cancel(cancelled) shouldBe true
+        events.next(0) shouldBe NotificationEvent.Dismissed("cancelled", DismissReason.CLOSED)
+
+        threads.toSet().size shouldBe 1
+        threads.first() shouldNotBe Thread.currentThread()
+        threads.first().name shouldStartWith "libnotify-fdo"
+    }
+
+    @Test
+    fun `a listener is never entered again while it is still running`() {
+        val server = daemon()
+        val notifier = notifier()
+        val inside = AtomicInteger()
+        val overlapped = AtomicBoolean()
+        val seen = RecordedEvents()
+        val handle = AtomicReference<NotificationHandle>()
+        notifier.onEvent { event ->
+            if (inside.incrementAndGet() > 1) overlapped.set(true)
+            try {
+                // Cancelling from inside raises a Dismissed while this call is live.
+                if (event is NotificationEvent.Activated) notifier.cancel(handle.get()) shouldBe true
+                seen.add(event)
+            } finally {
+                inside.decrementAndGet()
+            }
+        }
+        handle.set(notifier.notify(titled("t", tag = "t")))
+        server.click(server.awaitNotify().id)
+        seen.next() shouldBe NotificationEvent.Activated("t")
+        seen.next() shouldBe NotificationEvent.Dismissed("t", DismissReason.CLOSED)
+        overlapped.get() shouldBe false
     }
 
     @Test

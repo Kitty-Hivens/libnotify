@@ -25,7 +25,8 @@ internal class CancelIT : BusTest() {
         val handle = notifier.notify(titled("t"))!!
         server.awaitNotify()
         notifier.cancel(handle) shouldBe true
-        events.next() shouldBe NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED)
+        // Already delivered by the time cancel returned: no waiting allowed.
+        events.next(0) shouldBe NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED)
         notifier.notify(titled("marker", tag = "marker"))
         val marker = server.awaitNotify().id
         events.assertNothingBefore(server, marker, NotificationEvent.Activated("marker"))

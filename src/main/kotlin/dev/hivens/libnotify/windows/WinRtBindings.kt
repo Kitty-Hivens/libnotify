@@ -3,6 +3,7 @@ package dev.hivens.libnotify.windows
 import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
 import java.lang.foreign.Linker
+import java.lang.foreign.MemoryLayout
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.SymbolLookup
 import java.lang.foreign.ValueLayout
@@ -217,7 +218,7 @@ internal class WinRtBindings private constructor(
         const val DISMISS_APPLICATION_HIDDEN = 1
         const val DISMISS_TIMED_OUT = 2
 
-        private val LOAD_SET: List<Triple<String, java.lang.foreign.MemoryLayout?, List<java.lang.foreign.MemoryLayout>>> = listOf(
+        private val LOAD_SET: List<Triple<String, MemoryLayout?, List<MemoryLayout>>> = listOf(
             Triple("RoInitialize", ValueLayout.JAVA_INT, listOf(ValueLayout.JAVA_INT)),
             Triple("RoUninitialize", null, emptyList()),
             Triple("RoGetActivationFactory", ValueLayout.JAVA_INT,

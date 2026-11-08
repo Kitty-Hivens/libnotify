@@ -1,5 +1,6 @@
 @file:OptIn(ExperimentalAbiValidation::class)
 
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.abi.ExperimentalAbiValidation
 import java.util.UUID
 
@@ -75,7 +76,7 @@ java {
 
 kotlin {
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_22)
+        jvmTarget.set(JvmTarget.JVM_22)
         // Explicit API mode: this is a library, every public symbol must
         // declare its visibility and carry an explicit return type. Keeps
         // the published surface deliberate rather than accidental.

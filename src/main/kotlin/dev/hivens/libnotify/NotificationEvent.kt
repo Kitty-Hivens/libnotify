@@ -46,8 +46,12 @@ public sealed interface NotificationEvent {
      * the user, and [Notifier.cancel] apart where the platform reports it.
      *
      * A successful [Notifier.cancel] produces exactly one, with reason
-     * [DismissReason.CLOSED], on every platform. It may arrive before or after
-     * cancel returns, and on macOS it runs on the thread that called cancel.
+     * [DismissReason.CLOSED], on every platform. Called from anywhere but a
+     * listener, cancel delivers it before returning, so it comes before any event
+     * of a notification posted after the cancel, even one reusing the same tag.
+     * Called from a listener, it is delivered right after the current event has
+     * reached every listener, ahead of any other event, because listeners are
+     * never entered twice at once.
      */
     public data class Dismissed(
         override val notificationId: String,

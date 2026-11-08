@@ -1,5 +1,8 @@
 package dev.hivens.libnotify
 
+import dev.hivens.libnotify.linux.FreedesktopNotifier
+import dev.hivens.libnotify.macos.NsUserNotificationNotifier
+import dev.hivens.libnotify.windows.ToastNotifier
 import org.slf4j.LoggerFactory
 
 /**
@@ -9,11 +12,12 @@ import org.slf4j.LoggerFactory
  * `use { }`). Post notifications with [notify], cancel them with [cancel],
  * react to clicks via [onEvent].
  *
- * Threading: implementations do not pin the caller to a specific thread.
- * Backend-side event dispatch runs on a thread the backend owns (a D-Bus
- * signal pump on Linux, a WinRT delegate thread on Windows, the Cocoa run loop
- * on macOS), and [onEvent] listeners are invoked there. A consumer that wants to
- * touch UI state hops to its UI thread itself, for example with
+ * Threading: any thread may call the methods. Every event of one notifier is
+ * delivered on one thread the notifier owns, one at a time and in the order the
+ * notifier learned of them, on every platform: never on the caller's thread, the
+ * Cocoa main thread or a Windows threadpool thread. So a listener needs no
+ * locking for state only listeners touch. A consumer that wants to touch UI
+ * state hops to its UI thread itself, for example with
  * `SwingUtilities.invokeLater` or a coroutine launched on `Dispatchers.Main`.
  *
  * No-throw philosophy: notifications are a non-essential UX surface. [notify]
@@ -87,12 +91,9 @@ public interface Notifier : AutoCloseable {
             val osName = System.getProperty("os.name", "").lowercase()
             val backend: Notifier? = runCatching {
                 when {
-                    osName.contains("linux") || osName.contains("bsd") ->
-                        dev.hivens.libnotify.linux.FreedesktopNotifier.create(config)
-                    osName.contains("windows") ->
-                        dev.hivens.libnotify.windows.ToastNotifier.create(config)
-                    osName.contains("mac") || osName.contains("darwin") ->
-                        dev.hivens.libnotify.macos.NsUserNotificationNotifier.create(config)
+                    osName.contains("linux") || osName.contains("bsd") -> FreedesktopNotifier.create(config)
+                    osName.contains("windows") -> ToastNotifier.create(config)
+                    osName.contains("mac") || osName.contains("darwin") -> NsUserNotificationNotifier.create(config)
                     else -> null
                 }
             }.onFailure {

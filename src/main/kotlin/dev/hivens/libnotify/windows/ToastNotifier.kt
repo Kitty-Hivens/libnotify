@@ -35,9 +35,8 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * Flow per post: activate a `Windows.Data.Xml.Dom.XmlDocument`, `LoadXml` the
  * `ToastGeneric` payload ([ToastXml]), `CreateToastNotification` from it, stamp
- * the `Tag` (= the public id, used both for replace-in-place and to identify the
- * notification in activation callbacks), wire `add_Activated`/`add_Dismissed`
- * handlers, and `Show`.
+ * the `Tag` (= the public id, which the shell replaces in place by), wire
+ * `add_Activated`/`add_Dismissed` handlers, and `Show`.
  *
  * **AUMID.** Windows routes and de-duplicates toasts by Application User Model
  * ID. [NotifierConfig.appId] supplies it; a toast posted under an AUMID with no
@@ -46,11 +45,17 @@ import java.util.concurrent.atomic.AtomicLong
  * detect that the shell discarded it -- so a "nothing appears" symptom on
  * Windows almost always means an unregistered AUMID, not a libnotify fault.
  *
- * **Threading.** All WinRT calls run on a single [dispatchThread] that
- * `RoInitialize`s the MTA once and owns the notifier + factory for its life
- * (the [FreedesktopNotifier] task-queue pattern). MTA delivers activation
- * callbacks on system threadpool threads -- no message pump required -- so the
- * `Invoke` upcalls route by `Tag` through a process-wide concurrent map.
+ * **Threading.** One [dispatchThread] `RoInitialize`s the MTA, owns the notifier,
+ * the factory and every toast this backend tracks, and delivers every event. The
+ * MTA calls the `Invoke` upcalls on system threadpool threads: they only read
+ * what the event needs off the sender and its args, then hand it to the dispatch
+ * thread. So listeners run one at a time and in order, never on a pool thread.
+ *
+ * **Routing.** A callback finds its toast by COM identity, the object's
+ * `IUnknown` address, which COM guarantees stable and unique for a live object.
+ * The tag would not do: a cancelled or replaced toast shares its tag with the one
+ * posted after it, and its late callback would land on the newcomer. A callback
+ * for a toast no longer tracked finds nothing and is dropped.
  *
  * **On-metal status.** The activation-callback path (synthesised COM handlers,
  * lenient QueryInterface) is implemented to the SDK ABI but has not yet been
@@ -74,8 +79,12 @@ internal class ToastNotifier private constructor(
     @Volatile private var creationOk = false
     private val readyLatch = CountDownLatch(1)
 
-    /** publicId -> retained IToastNotification* (dispatch-thread-owned; held for Hide + replace). */
-    private val deliveredToasts = HashMap<String, MemorySegment>()
+    /** A shown toast: the retained IToastNotification* (held for Hide and replace) and its COM identity. */
+    private class Delivered(val toast: MemorySegment, val identity: Long)
+
+    // Dispatch-thread-owned, both of them.
+    private val deliveredToasts = HashMap<String, Delivered>()
+    private val idByIdentity = HashMap<Long, String>()
 
     private val dispatchThread = Thread({ dispatchLoop() }, "libnotify-toast-${ProcessHandle.current().pid()}").apply {
         isDaemon = true
@@ -107,6 +116,9 @@ internal class ToastNotifier private constructor(
     override fun close() {
         if (!open.compareAndSet(true, false)) return
         calls.shutdown()
+        // Called from a listener: the loop exits and tears down once that
+        // listener returns, and joining here would only wait on ourselves.
+        if (Thread.currentThread() === dispatchThread) return
         dispatchThread.join(3_000)
     }
 
@@ -172,10 +184,9 @@ internal class ToastNotifier private constructor(
     }
 
     private fun teardown() {
-        synchronized(this) {
-            for (toast in deliveredToasts.values) bindings.release(toast)
-            deliveredToasts.clear()
-        }
+        for (entry in deliveredToasts.values) bindings.release(entry.toast)
+        deliveredToasts.clear()
+        idByIdentity.clear()
         bindings.release(notifier)
         bindings.release(factory)
         notifier = MemorySegment.NULL
@@ -204,10 +215,17 @@ internal class ToastNotifier private constructor(
             val xmlDoc = createXmlDocument(call, xml) ?: run { log.warn("XmlDocument LoadXml failed"); return null }
             try {
                 val toast = createToast(call, xmlDoc) ?: run { log.warn("CreateToastNotification failed"); return null }
+                val identity = identityOf(bindings, call, toast) ?: run {
+                    log.warn("the new toast answered no IUnknown, so its events could not be routed")
+                    bindings.release(toast)
+                    return null
+                }
                 val publicId = n.tag ?: nextAnonId()
                 setTag(call, toast, publicId)
                 wireHandlers(call, toast)
 
+                // Routed before Show, so a callback that Show sets off finds it.
+                OWNER[identity] = this
                 val showFn = bindings.downcall(
                     bindings.vtableFn(notifier, WinRtBindings.IDX_SHOW),
                     FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
@@ -215,14 +233,15 @@ internal class ToastNotifier private constructor(
                 val hr = showFn.invokeExact(notifier, toast) as Int
                 if (hr < 0) {
                     log.warn("IToastNotifier.Show failed: 0x{}", Integer.toHexString(hr))
+                    OWNER.remove(identity, this)
                     bindings.release(toast)
                     return null
                 }
 
-                deliveredToasts.put(publicId, toast)?.let { old ->
-                    if (old.address() != toast.address()) bindings.release(old)
-                }
-                OWNER[publicId] = this
+                // The shell replaced the prior toast with this tag, so stop tracking it.
+                untrack(publicId)
+                deliveredToasts[publicId] = Delivered(toast, identity)
+                idByIdentity[identity] = publicId
                 return NotificationHandle(publicId)
             } finally {
                 bindings.release(xmlDoc)
@@ -231,18 +250,25 @@ internal class ToastNotifier private constructor(
     }
 
     private fun doCancel(handle: NotificationHandle): Boolean {
-        val toast = deliveredToasts[handle.id] ?: return false
-        // Unrouted before Hide: a Dismissed callback that Hide sets off then finds
-        // no owner, and the event fired below is the only one.
-        OWNER.remove(handle.id, this)
+        val entry = deliveredToasts[handle.id] ?: return false
         val hr = bindings.downcall(
             bindings.vtableFn(notifier, WinRtBindings.IDX_HIDE),
             FunctionDescriptor.of(ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS),
-        ).invokeExact(notifier, toast) as Int
-        deliveredToasts.remove(handle.id)?.let { bindings.release(it) }
+        ).invokeExact(notifier, entry.toast) as Int
+        // Untracked either way: on success the Dismissed callback that Hide sets
+        // off then finds nothing, and the event fired below is the only one.
+        untrack(handle.id)
         if (hr < 0) return false
         fire(NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED))
         return true
+    }
+
+    /** Dispatch thread only. Forget a toast and release it. */
+    private fun untrack(publicId: String) {
+        val entry = deliveredToasts.remove(publicId) ?: return
+        idByIdentity.remove(entry.identity)
+        OWNER.remove(entry.identity, this)
+        bindings.release(entry.toast)
     }
 
     private fun createXmlDocument(call: Arena, xml: String): MemorySegment? {
@@ -320,9 +346,10 @@ internal class ToastNotifier private constructor(
         }.onFailure { log.warn("add_Dismissed failed: {}", it.message) }
     }
 
-    // ── Called from the static Invoke upcalls (system callback thread) ────────
+    // ── Events, handed over from the Invoke upcalls, run on the dispatch thread ──
 
-    private fun onActivated(publicId: String, arguments: String?) {
+    private fun onActivated(identity: Long, arguments: String?) {
+        val publicId = idByIdentity[identity] ?: return
         val arg = arguments?.takeIf { it.isNotBlank() } ?: DEFAULT_ACTION_ID
         if (arg == DEFAULT_ACTION_ID) {
             fire(NotificationEvent.Activated(publicId))
@@ -331,11 +358,12 @@ internal class ToastNotifier private constructor(
         }
     }
 
-    private fun onDismissed(publicId: String, reasonCode: Int) {
+    private fun onDismissed(identity: Long, reasonCode: Int) {
+        val publicId = idByIdentity[identity] ?: return
+        // Untracked before the listeners run, so one that posts the same tag
+        // again starts clean and keeps its own toast.
+        untrack(publicId)
         fire(NotificationEvent.Dismissed(publicId, mapReason(reasonCode)))
-        OWNER.remove(publicId, this)
-        // Release the kept toast on the dispatch thread (COM object lifecycle).
-        calls.post("Toast release") { deliveredToasts.remove(publicId)?.let { bindings.release(it) } }
     }
 
     private fun fire(event: NotificationEvent) = listeners.fire(event)
@@ -367,8 +395,8 @@ internal class ToastNotifier private constructor(
         /** WinRT calls have no timeout of their own, so this is what bounds a started one. */
         private const val WORK_CAP_MS = 5_000L
 
-        /** publicId -> owning notifier, for activation routing across instances. Concurrent: callbacks run off-thread. */
-        private val OWNER = ConcurrentHashMap<String, ToastNotifier>()
+        /** COM identity of a shown toast -> owning notifier. Concurrent: callbacks look it up off-thread. */
+        private val OWNER = ConcurrentHashMap<Long, ToastNotifier>()
 
         /** Content-hash -> file URI for toast images, so repeated posts of the same icon reuse one temp file. */
         private val IMAGE_CACHE = ConcurrentHashMap<Int, String>()
@@ -429,41 +457,52 @@ internal class ToastNotifier private constructor(
             dismissedHandler = bindings.makeEventHandler(disStub)
         }
 
-        /** `ITypedEventHandler::Invoke` for activation. `HRESULT f(self, sender, args)`. */
+        /**
+         * `ITypedEventHandler::Invoke` for activation. `HRESULT f(self, sender, args)`.
+         * Runs on a pool thread: reads what the event needs while the sender and
+         * args are valid, then hands it to the owner's dispatch thread.
+         */
         @JvmStatic
         @Suppress("UNUSED_PARAMETER")
         fun activatedInvokeEntry(self: MemorySegment, sender: MemorySegment, args: MemorySegment): Int {
             runCatching {
                 val b = lastBindings ?: return 0
                 Arena.ofConfined().use { call ->
-                    val publicId = readTag(b, call, sender) ?: return@use
-                    val owner = OWNER[publicId] ?: return@use
+                    val identity = identityOf(b, call, sender) ?: return@use
+                    val owner = OWNER[identity] ?: return@use
                     val arguments = readHStringProperty(b, call, args, WinRtBindings.IID_TOAST_ACTIVATED_ARGS, WinRtBindings.IDX_GET_ARGUMENTS)
-                    owner.onActivated(publicId, arguments)
+                    owner.calls.post("Toast activated") { owner.onActivated(identity, arguments) }
                 }
             }.onFailure { log.warn("activated callback threw: {}", it.message) }
             return 0  // S_OK
         }
 
-        /** `ITypedEventHandler::Invoke` for dismissal. `HRESULT f(self, sender, args)`. */
+        /** `ITypedEventHandler::Invoke` for dismissal, handed over like [activatedInvokeEntry]. */
         @JvmStatic
         @Suppress("UNUSED_PARAMETER")
         fun dismissedInvokeEntry(self: MemorySegment, sender: MemorySegment, args: MemorySegment): Int {
             runCatching {
                 val b = lastBindings ?: return 0
                 Arena.ofConfined().use { call ->
-                    val publicId = readTag(b, call, sender) ?: return@use
-                    val owner = OWNER[publicId] ?: return@use
-                    owner.onDismissed(publicId, readReason(b, call, args))
+                    val identity = identityOf(b, call, sender) ?: return@use
+                    val owner = OWNER[identity] ?: return@use
+                    val reason = readReason(b, call, args)
+                    owner.calls.post("Toast dismissed") { owner.onDismissed(identity, reason) }
                 }
             }.onFailure { log.warn("dismissed callback threw: {}", it.message) }
             return 0  // S_OK
         }
 
-        /** Read the toast's Tag (= our public id) off the sender via IToastNotification2.get_Tag. */
-        private fun readTag(b: WinRtBindings, call: Arena, sender: MemorySegment): String? {
-            return readHStringProperty(b, call, sender, WinRtBindings.IID_TOAST_NOTIFICATION2, WinRtBindings.IDX_GET_TAG)
-                ?.takeIf { it.isNotEmpty() }
+        /**
+         * The COM identity of [obj]: the address QueryInterface returns for
+         * IUnknown, which COM guarantees is the same for every interface pointer
+         * to one object for as long as it lives.
+         */
+        private fun identityOf(b: WinRtBindings, call: Arena, obj: MemorySegment): Long? {
+            val unknown = b.queryInterface(obj, WinRtBindings.IID_UNKNOWN, call) ?: return null
+            val identity = unknown.address()
+            b.release(unknown)
+            return identity
         }
 
         /** QI [obj] for [iid] and read an HSTRING-returning property at [index]. */

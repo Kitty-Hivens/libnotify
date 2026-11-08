@@ -38,7 +38,8 @@ import javax.imageio.ImageIO
  * runs on one [dispatchThread], which also frees the connection when it exits.
  * Public API methods ([notify], [cancel]) hand their work over through [calls] and
  * wait for the answer. That keeps the native call off the caller's thread, but the
- * caller still blocks while it waits, so a hung daemon holds it for seconds.
+ * caller still blocks while it waits, so a hung daemon holds it for seconds. The
+ * same thread delivers every event, so listeners run one at a time and in order.
  *
  * **Bus loss.** When the session bus goes away the next call opens a new
  * connection, so a restarted bus needs nothing from the host application. What
@@ -273,14 +274,19 @@ internal class FreedesktopNotifier private constructor(
                     log.warn("CloseNotification got no reply (server absent or slow)")
                 }
                 freeErrorIfSet(error)
-                // On success the server also answers with a NotificationClosed
-                // signal, which our pump turns into Dismissed(CLOSED) and uses
-                // to clear the maps.
-                return delivered
+                if (!delivered) return false
             } finally {
                 runCatching { bindings.handle("dbus_message_unref").invokeExact(msg) as Unit }
             }
         }
+        // The server also sends NotificationClosed, but the pump reads it only
+        // after the queued calls, by which time a repost of the same tag may
+        // have gone out with this id. Settling it here delivers the event before
+        // cancel returns, and the late signal finds no mapping and is dropped.
+        serverToPublic.remove(serverId)
+        publicToServer.remove(handle.id)
+        fire(NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED))
+        return true
     }
 
     /** Send [msg] with a blocking reply and read a single uint32 out of it (the Notify id). */

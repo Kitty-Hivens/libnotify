@@ -55,9 +55,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `Notifier.create` is a static method for Java callers, and the empty
   `NotificationAction.Companion` is gone.
 - A successful `cancel` produces exactly one `Dismissed(CLOSED)` on every
-  platform. Linux already sent it, Windows raced its own callback and could send
-  none, and macOS sent none. The KDoc said cancel produced no `Dismissed` at all
-  while also documenting `CLOSED` as the reason for one.
+  platform, delivered before `cancel` returns, or right after the current event
+  when called from a listener. Linux sent it whenever the server's signal got
+  read, after a repost of the same tag could already have taken the old id, so
+  it went missing or landed on the new notification. Windows raced its own
+  callback and macOS sent none. The KDoc said cancel produced no `Dismissed` at
+  all while also documenting `CLOSED` as the reason for one.
+- Every event of a notifier is delivered on one thread the notifier owns, one at
+  a time and in order, on every platform, and a listener is never entered twice
+  at once. Windows called listeners from WinRT threadpool threads, concurrently
+  with each other, and macOS from the Cocoa main thread and from whichever thread
+  called `cancel`. Only Linux kept the order the KDoc promised.
+- Windows: a toast's events are matched to it by COM identity instead of by tag.
+  A late callback from a cancelled or replaced toast landed on the newer toast
+  with the same tag, which then lost its events and could no longer be
+  cancelled, and a listener that reposted the tag of a dismissed toast lost the
+  new one the same way. `close()` from a listener no longer waits three seconds
+  on its own thread.
+- macOS: a `notify` that raced `close()` no longer posts a banner and retains it
+  in a notifier that has already let go.
 - The `appId` KDoc says what Linux does with it: it goes out as the
   `desktop-entry` hint. It said the opposite.
 - `SmokeMain` moved into the test source set so it no longer ships in the

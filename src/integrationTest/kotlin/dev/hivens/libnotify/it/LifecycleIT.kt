@@ -1,5 +1,7 @@
 package dev.hivens.libnotify.it
 
+import dev.hivens.libnotify.DismissReason
+import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationHandle
 import dev.hivens.libnotify.Notifier
 import dev.hivens.libnotify.NotifierConfig
@@ -122,6 +124,41 @@ internal class LifecycleIT : BusTest() {
         server.click(id)
         result.get(10, TimeUnit.SECONDS) shouldBe true
         server.awaitCloseRequest() shouldBe id
+    }
+
+    @Test
+    fun `a listener can cancel a notification and post its tag again at once`() {
+        val server = daemon()
+        val notifier = notifier()
+        val events = notifier.record()
+        val repost = CompletableFuture<NotificationHandle?>()
+        val handle = AtomicReference<NotificationHandle>()
+        notifier.onEvent { event ->
+            if (event == NotificationEvent.Activated("x") && !repost.isDone) {
+                notifier.cancel(handle.get())
+                repost.complete(notifier.notify(titled("x again", tag = "x")))
+            }
+        }
+        val first = notifier.notify(titled("x", tag = "x"))!!
+        handle.set(first)
+        val firstId = server.awaitNotify().id
+        server.click(firstId)
+
+        repost.get(10, TimeUnit.SECONDS)?.id shouldBe "x"
+        // The cancel ran inside the Activated delivery, so its Dismissed follows it.
+        events.next() shouldBe NotificationEvent.Activated(first.id)
+        events.next() shouldBe NotificationEvent.Dismissed("x", DismissReason.CLOSED)
+        server.awaitCloseRequest() shouldBe firstId
+        val again = server.awaitNotify()
+        // Cancelled first, so the repost is a new banner, not a replacement of the old id.
+        again.replacesId shouldBe 0
+
+        // The server's own NotificationClosed for the old id arrives late and must
+        // not become a second Dismissed, nor touch the new banner.
+        server.click(again.id)
+        events.next() shouldBe NotificationEvent.Activated("x")
+        notifier.notify(titled("marker", tag = "marker"))
+        events.assertNothingBefore(server, server.awaitNotify().id, NotificationEvent.Activated("marker"))
     }
 
     @Test
