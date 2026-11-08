@@ -113,13 +113,14 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 // How many tests ran, printed on every run, with a ceiling on how many may skip
-// and a floor on how many must run. Without it a suite that skipped itself into
+// and the classes that must run. Without it a suite that skipped itself into
 // silence looks exactly like one that passed: Gradle prints totals only when
 // something fails. The integration suite skips on purpose where its platform is
 // not the host's, so its limits depend on where it runs:
 //   - Linux runs everything but PlatformSmokeIT, hence one allowed skip.
-//   - Windows and macOS run only PlatformSmokeIT, and only on CI, so there the
-//     floor is what catches the smoke test skipping itself.
+//   - Windows and macOS skip the bus suite and run PlatformSmokeIT, on CI only.
+//     A count cannot guard that, the bus-free knownGap tests always run there,
+//     so the smoke test is required by name.
 // Raise a limit deliberately with -PmaxSkippedTests when a gap is real.
 val hostIsLinux = System.getProperty("os.name").lowercase().contains("linux")
 val onCi = providers.environmentVariable("CI").orNull == "true"
@@ -132,19 +133,20 @@ tasks.withType<Test>().configureEach {
             else -> Int.MAX_VALUE
         },
     )
-    val minRan = if (integration && !hostIsLinux && onCi) 1 else 0
+    val mustRun = if (integration && !hostIsLinux && onCi) listOf("PlatformSmokeIT") else emptyList()
     // Inputs, because they decide whether the task passes and Gradle keys its
     // cache on inputs alone: a lowered ceiling must not be served an old green.
     inputs.property("libnotifyMaxSkipped", maxSkipped)
-    inputs.property("libnotifyMinRan", minRan)
+    inputs.property("libnotifyMustRun", mustRun)
     val xmlDir = reports.junitXml.outputLocation
     val label = path
     doLast {
         var total = 0
         var skipped = 0
         val names = mutableListOf<String>()
+        val ranClasses = mutableSetOf<String>()
         val head = Regex("<testsuite\\b[^>]*")
-        val skippedCase = Regex("<testcase name=\"([^\"]*)\" classname=\"([^\"]*)\"[^>]*>\\s*<skipped")
+        val case = Regex("<testcase name=\"([^\"]*)\" classname=\"([^\"]*)\"[^>]*>(\\s*<skipped)?")
         fun count(text: String, attribute: String): Int =
             Regex("\\b$attribute=\"(\\d+)\"").find(text)?.groupValues?.get(1)?.toInt() ?: 0
         for (f in xmlDir.get().asFile.listFiles().orEmpty()) {
@@ -153,17 +155,24 @@ tasks.withType<Test>().configureEach {
             val suite = head.find(text) ?: continue
             total += count(suite.value, "tests")
             skipped += count(suite.value, "skipped")
-            for (m in skippedCase.findAll(text)) {
-                names += m.groupValues[2].substringAfterLast('.') + " > " + m.groupValues[1]
+            for (m in case.findAll(text)) {
+                val className = m.groupValues[2].substringAfterLast('.')
+                if (m.groupValues[3].isNotEmpty()) {
+                    names += className + " > " + m.groupValues[1]
+                } else {
+                    ranClasses += className
+                }
             }
         }
         val ran = total - skipped
         logger.lifecycle("$label: $ran of $total tests ran, $skipped skipped")
-        if (skipped > maxSkipped || ran < minRan) {
+        val missing = mustRun.filterNot { it in ranClasses }
+        if (skipped > maxSkipped || missing.isNotEmpty()) {
             throw GradleException(
-                "$label ran $ran and skipped $skipped tests, outside the limits of at most $maxSkipped " +
-                    "skipped and at least $minRan run. Something the suite needs is missing rather than " +
-                    "the suite passing.\n" + names.sorted().joinToString("\n") { "  $it" },
+                "$label ran $ran and skipped $skipped tests: at most $maxSkipped may skip, and " +
+                    "${missing.ifEmpty { listOf("nothing") }.joinToString()} had to run but did not. " +
+                    "Something the suite needs is missing rather than the suite passing.\n" +
+                    names.sorted().joinToString("\n") { "  $it" },
             )
         }
     }
