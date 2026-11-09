@@ -30,11 +30,16 @@ public class NotifierConfig(
     public val appName: String,
     public val appId: String? = null,
     public val defaultIconName: String? = null,
-    public val defaultIconBytes: ByteArray? = null,
+    defaultIconBytes: ByteArray? = null,
 ) {
+    private val icon: ByteArray? = defaultIconBytes?.copyOf()
+
+    /** The default icon bytes, copied on the way in and as a fresh copy on every read. */
+    public val defaultIconBytes: ByteArray? get() = icon?.copyOf()
+
     init {
         require(appName.isNotBlank()) { "appName must be non-blank" }
-        require(defaultIconBytes == null || defaultIconBytes.isNotEmpty()) {
+        require(icon == null || icon.isNotEmpty()) {
             "defaultIconBytes, when set, must be non-empty"
         }
     }
@@ -51,20 +56,20 @@ public class NotifierConfig(
         return appName == other.appName &&
             appId == other.appId &&
             defaultIconName == other.defaultIconName &&
-            (defaultIconBytes?.contentEquals(other.defaultIconBytes) ?: (other.defaultIconBytes == null))
+            (icon?.contentEquals(other.icon) ?: (other.icon == null))
     }
 
     override fun hashCode(): Int {
         var result = appName.hashCode()
         result = 31 * result + (appId?.hashCode() ?: 0)
         result = 31 * result + (defaultIconName?.hashCode() ?: 0)
-        result = 31 * result + (defaultIconBytes?.contentHashCode() ?: 0)
+        result = 31 * result + (icon?.contentHashCode() ?: 0)
         return result
     }
 
     override fun toString(): String =
         "NotifierConfig(appName=$appName, appId=$appId, defaultIconName=$defaultIconName, " +
-            "defaultIconBytes=${defaultIconBytes?.let { "${it.size} bytes" }})"
+            "defaultIconBytes=${icon?.let { "${it.size} bytes" }})"
 
     /** Builds a [NotifierConfig] step by step. [build] checks it like the constructor does. */
     public class Builder(private var appName: String) {

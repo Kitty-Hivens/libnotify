@@ -1,5 +1,7 @@
 package dev.hivens.libnotify
 
+import java.util.Collections
+
 /**
  * One desktop notification to post via [Notifier.notify].
  *
@@ -7,6 +9,9 @@ package dev.hivens.libnotify
  * same [tag] and post it again. The backend replaces the prior banner in place
  * where the platform supports it (freedesktop `replaces_id`, Windows toast `Tag`,
  * macOS `identifier`). [toBuilder] starts the new one from this one's values.
+ * The icon bytes are copied on the way in and on the way out, and [actions] is a
+ * read-only copy, so neither the caller's array or list nor what a getter hands
+ * back can change a notification after it was built.
  *
  * Kotlin builds one with named arguments, Java with [Builder]:
  * `new Notification.Builder("Title").body("Text").build()`.
@@ -55,19 +60,26 @@ package dev.hivens.libnotify
 public class Notification(
     public val title: String,
     public val body: String = "",
-    public val iconBytes: ByteArray? = null,
+    iconBytes: ByteArray? = null,
     public val iconName: String? = null,
     public val urgency: Urgency = Urgency.NORMAL,
     public val timeout: Timeout = Timeout.ServerDefault,
-    public val actions: List<NotificationAction> = emptyList(),
+    actions: List<NotificationAction> = emptyList(),
     public val category: String? = null,
     public val tag: String? = null,
 ) {
+    private val icon: ByteArray? = iconBytes?.copyOf()
+
+    /** The icon bytes, as a fresh copy on every read. */
+    public val iconBytes: ByteArray? get() = icon?.copyOf()
+
+    public val actions: List<NotificationAction> = Collections.unmodifiableList(actions.toList())
+
     init {
         require(title.isNotBlank()) { "title must be non-blank" }
-        require(iconBytes == null || iconBytes.isNotEmpty()) { "iconBytes, when set, must be non-empty" }
+        require(icon == null || icon.isNotEmpty()) { "iconBytes, when set, must be non-empty" }
         require(tag == null || tag.isNotBlank()) { "tag, when set, must be non-blank" }
-        val ids = actions.map { it.id }
+        val ids = this.actions.map { it.id }
         require(ids.toSet().size == ids.size) { "action ids must be unique within a notification: $ids" }
     }
 
@@ -87,7 +99,7 @@ public class Notification(
         if (other !is Notification) return false
         return title == other.title &&
             body == other.body &&
-            (iconBytes?.contentEquals(other.iconBytes) ?: (other.iconBytes == null)) &&
+            (icon?.contentEquals(other.icon) ?: (other.icon == null)) &&
             iconName == other.iconName &&
             urgency == other.urgency &&
             timeout == other.timeout &&
@@ -99,7 +111,7 @@ public class Notification(
     override fun hashCode(): Int {
         var result = title.hashCode()
         result = 31 * result + body.hashCode()
-        result = 31 * result + (iconBytes?.contentHashCode() ?: 0)
+        result = 31 * result + (icon?.contentHashCode() ?: 0)
         result = 31 * result + (iconName?.hashCode() ?: 0)
         result = 31 * result + urgency.hashCode()
         result = 31 * result + timeout.hashCode()
@@ -110,7 +122,7 @@ public class Notification(
     }
 
     override fun toString(): String =
-        "Notification(title=$title, body=$body, iconBytes=${iconBytes?.let { "${it.size} bytes" }}, " +
+        "Notification(title=$title, body=$body, iconBytes=${icon?.let { "${it.size} bytes" }}, " +
             "iconName=$iconName, urgency=$urgency, timeout=$timeout, actions=$actions, " +
             "category=$category, tag=$tag)"
 

@@ -22,9 +22,12 @@ internal const val DEFAULT_ACTION_ID: String = "default"
  *   is delivered as [NotificationEvent.Activated], not as an action.
  * @property label Human-readable button text shown to the user.
  */
-public data class NotificationAction(
-    val id: String,
-    val label: String,
+// Not a data class, for the reason given on Notification: an action is the type
+// most likely to grow (a reply field, an icon), and copy and componentN would
+// make every new property a binary break.
+public class NotificationAction(
+    public val id: String,
+    public val label: String,
 ) {
     init {
         require(id.isNotBlank()) { "action id must be non-blank" }
@@ -33,4 +36,14 @@ public data class NotificationAction(
         }
         require(label.isNotBlank()) { "action label must be non-blank" }
     }
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is NotificationAction) return false
+        return id == other.id && label == other.label
+    }
+
+    override fun hashCode(): Int = 31 * id.hashCode() + label.hashCode()
+
+    override fun toString(): String = "NotificationAction(id=$id, label=$label)"
 }

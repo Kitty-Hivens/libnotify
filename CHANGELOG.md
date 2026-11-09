@@ -54,6 +54,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `NotifierCapabilities.Builder`, which starts with every capability off. Its
   constructor, `copy` and `componentN` are gone, so a new capability no longer
   breaks binary compatibility. Reading it is unchanged.
+- Breaking: `NotificationAction` is a plain class too. Its constructor and
+  equality are unchanged, `copy` and the `componentN` functions are gone.
+- `Notification` and `NotifierConfig` copy their icon bytes on the way in and on
+  every read, and `Notification.actions` is a read-only copy. Changing the array
+  or list given to the constructor, or one a getter returned, used to change the
+  notification after it was built, its hash code included.
 - Implementing `Notifier`, for a test double, is now documented as supported. A
   method added to the interface later comes with a default implementation.
 - Moving from 0.1.x:

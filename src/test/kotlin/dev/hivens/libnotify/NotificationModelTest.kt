@@ -123,6 +123,51 @@ class NotificationModelTest {
     }
 
     @Test
+    fun `changing the caller's icon array afterwards does not change the notification`() {
+        val bytes = byteArrayOf(1, 2, 3)
+        val n = Notification(title = "t", iconBytes = bytes)
+        val before = n.hashCode()
+        bytes[0] = 9
+        n.iconBytes!!.toList() shouldBe listOf<Byte>(1, 2, 3)
+        n.hashCode() shouldBe before
+    }
+
+    @Test
+    fun `changing the icon array a getter returned does not change the notification`() {
+        val n = Notification(title = "t", iconBytes = byteArrayOf(1, 2, 3))
+        n.iconBytes!![0] = 9
+        n.iconBytes!!.toList() shouldBe listOf<Byte>(1, 2, 3)
+    }
+
+    @Test
+    fun `the action list cannot be changed after the fact, not even through a cast`() {
+        val source = mutableListOf(NotificationAction("a", "A"), NotificationAction("b", "B"))
+        val n = Notification(title = "t", actions = source)
+        source.clear()
+        n.actions.size shouldBe 2
+        @Suppress("UNCHECKED_CAST")
+        shouldThrow<UnsupportedOperationException> {
+            (n.actions as MutableList<NotificationAction>).add(NotificationAction("c", "C"))
+        }
+    }
+
+    @Test
+    fun `the config's default icon is copied in and out too`() {
+        val bytes = byteArrayOf(1, 2)
+        val config = NotifierConfig(appName = "a", defaultIconBytes = bytes)
+        bytes[0] = 9
+        config.defaultIconBytes!![1] = 9
+        config.defaultIconBytes!!.toList() shouldBe listOf<Byte>(1, 2)
+    }
+
+    @Test
+    fun `actions compare by value`() {
+        NotificationAction("a", "A") shouldBe NotificationAction("a", "A")
+        NotificationAction("a", "A").hashCode() shouldBe NotificationAction("a", "A").hashCode()
+        NotificationAction("a", "A").toString() shouldBe "NotificationAction(id=a, label=A)"
+    }
+
+    @Test
     fun `NotifierConfig equality is icon content-based`() {
         val a = NotifierConfig(appName = "App", defaultIconBytes = byteArrayOf(9, 9))
         val b = NotifierConfig(appName = "App", defaultIconBytes = byteArrayOf(9, 9))
