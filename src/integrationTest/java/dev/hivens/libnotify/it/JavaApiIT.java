@@ -11,7 +11,9 @@ import dev.hivens.libnotify.Notification;
 import dev.hivens.libnotify.NotificationAction;
 import dev.hivens.libnotify.NotificationEvent;
 import dev.hivens.libnotify.NotificationHandle;
+import dev.hivens.libnotify.NotificationListener;
 import dev.hivens.libnotify.Notifier;
+import dev.hivens.libnotify.NotifierCapabilities;
 import dev.hivens.libnotify.NotifierConfig;
 import dev.hivens.libnotify.Subscription;
 import dev.hivens.libnotify.Timeout;
@@ -77,6 +79,28 @@ class JavaApiIT extends BusTest {
             assertNull(events.poll(400, TimeUnit.MILLISECONDS));
 
             assertTrue(notifier.getCapabilities().getActions());
+        }
+    }
+
+    /** A Java consumer's test double, the shape it takes without Kotlin around. */
+    private static final class JavaFakeNotifier implements Notifier {
+        private boolean open = true;
+
+        @Override public boolean isOpen() { return open; }
+        @Override public NotifierCapabilities getCapabilities() {
+            return new NotifierCapabilities.Builder().actions(true).maxActions(1).build();
+        }
+        @Override public NotificationHandle notify(Notification notification) { return null; }
+        @Override public boolean cancel(NotificationHandle handle) { return false; }
+        @Override public Subscription onEvent(NotificationListener listener) { return () -> { }; }
+        @Override public void close() { open = false; }
+    }
+
+    @Test
+    void aJavaConsumerCanImplementNotifierAsATestDouble() {
+        try (Notifier fake = new JavaFakeNotifier(); Subscription ignored = fake.onEvent(event -> { })) {
+            assertTrue(fake.isOpen());
+            assertEquals(1, fake.getCapabilities().getMaxActions());
         }
     }
 }

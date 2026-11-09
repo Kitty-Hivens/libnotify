@@ -50,8 +50,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `Subscription` to close, instead of Kotlin function types. Kotlin lambdas still
   convert. Closing a subscription removes that registration only, so a listener
   registered twice keeps its other registration.
-- Breaking: `NotifierCapabilities` can no longer be constructed or copied outside
-  the library. Reading it is unchanged.
+- Breaking: `NotifierCapabilities` is a plain class built through
+  `NotifierCapabilities.Builder`, which starts with every capability off. Its
+  constructor, `copy` and `componentN` are gone, so a new capability no longer
+  breaks binary compatibility. Reading it is unchanged.
+- Implementing `Notifier`, for a test double, is now documented as supported. A
+  method added to the interface later comes with a default implementation.
+- Moving from 0.1.x:
+  - `val unsubscribe: () -> Unit = notifier.onEvent { ... }` and
+    `unsubscribe()` become `val subscription: Subscription = notifier.onEvent { ... }`
+    and `subscription.close()`. The lambda itself is unchanged.
+  - `notification.copy(title = "x")` becomes
+    `notification.toBuilder().title("x").build()`, the same for `NotifierConfig`.
+  - In a test double, `NotifierCapabilities(false, 0, ...)` becomes
+    `NotifierCapabilities.Builder().build()`, plus a setter per capability the
+    double should claim, and `override fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit`
+    becomes `override fun onEvent(listener: NotificationListener): Subscription`.
 - `Notifier.create` is a static method for Java callers, and the empty
   `NotificationAction.Companion` is gone.
 - A successful `cancel` produces exactly one `Dismissed(CLOSED)` on every

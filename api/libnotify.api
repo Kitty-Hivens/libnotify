@@ -122,13 +122,6 @@ public final class dev/hivens/libnotify/Notifier$Companion {
 }
 
 public final class dev/hivens/libnotify/NotifierCapabilities {
-	public final fun component1 ()Z
-	public final fun component2 ()I
-	public final fun component3 ()Z
-	public final fun component4 ()Z
-	public final fun component5 ()Z
-	public final fun component6 ()Z
-	public final fun component7 ()Z
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getActions ()Z
 	public final fun getBodyMarkup ()Z
@@ -138,7 +131,20 @@ public final class dev/hivens/libnotify/NotifierCapabilities {
 	public final fun getReplace ()Z
 	public final fun getUrgency ()Z
 	public fun hashCode ()I
+	public final fun toBuilder ()Ldev/hivens/libnotify/NotifierCapabilities$Builder;
 	public fun toString ()Ljava/lang/String;
+}
+
+public final class dev/hivens/libnotify/NotifierCapabilities$Builder {
+	public fun <init> ()V
+	public final fun actions (Z)Ldev/hivens/libnotify/NotifierCapabilities$Builder;
+	public final fun bodyMarkup (Z)Ldev/hivens/libnotify/NotifierCapabilities$Builder;
+	public final fun build ()Ldev/hivens/libnotify/NotifierCapabilities;
+	public final fun closeEvents (Z)Ldev/hivens/libnotify/NotifierCapabilities$Builder;
+	public final fun icons (Z)Ldev/hivens/libnotify/NotifierCapabilities$Builder;
+	public final fun maxActions (I)Ldev/hivens/libnotify/NotifierCapabilities$Builder;
+	public final fun replace (Z)Ldev/hivens/libnotify/NotifierCapabilities$Builder;
+	public final fun urgency (Z)Ldev/hivens/libnotify/NotifierCapabilities$Builder;
 }
 
 public final class dev/hivens/libnotify/NotifierConfig {

@@ -20,6 +20,11 @@ import org.slf4j.LoggerFactory
  * state hops to its UI thread itself, for example with
  * `SwingUtilities.invokeLater` or a coroutine launched on `Dispatchers.Main`.
  *
+ * Implementing it is supported, for test doubles in the first place: build the
+ * [capabilities] with [NotifierCapabilities.Builder]. A method added to this
+ * interface later comes with a default implementation, so an existing double
+ * keeps compiling and linking.
+ *
  * No-throw philosophy: notifications are a non-essential UX surface. [notify]
  * returns null and [cancel] returns false on failure rather than throwing, so a
  * transient backend fault (D-Bus daemon restart, unregistered AUMID) degrades
