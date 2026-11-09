@@ -11,6 +11,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   dead for good while `isOpen` kept reporting true. Notifications posted before
   the restart belong to the old bus, so they report no more events and cannot be
   cancelled.
+- Linux: icons are decoded in memory. `ImageIO.read` on a stream cached the
+  icon bytes in a temporary file on disk for the length of the decode.
+- Linux: an icon whose header claims more than 4096 by 4096 pixels is dropped
+  before decoding, where a small file could make the decoder allocate gigabytes.
+  Larger ones within that are scaled to 256 on their longest side, since servers
+  draw them at a few dozen pixels and every pixel is four bytes in the message.
+- Linux: icons are decoded on the calling thread instead of the dispatch thread,
+  where a large one held up every other call and event, and the default icon is
+  decoded once instead of on every post.
 - Linux: `Notification.body` is plain text on servers that parse markup too. It
   went out verbatim, so such a server treated `report<final>.pdf` as a tag and
   dropped part of the text, and tags in third-party text reached the server as

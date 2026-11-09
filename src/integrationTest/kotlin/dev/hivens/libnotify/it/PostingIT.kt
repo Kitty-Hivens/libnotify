@@ -6,12 +6,17 @@ import dev.hivens.libnotify.NotifierConfig
 import dev.hivens.libnotify.Timeout
 import dev.hivens.libnotify.Urgency
 import io.kotest.matchers.collections.shouldHaveSize
+import io.kotest.matchers.comparables.shouldBeLessThan
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import org.junit.jupiter.api.Test
+import java.nio.file.FileSystems
+import java.nio.file.Files
+import java.nio.file.StandardWatchEventKinds
 import java.util.Collections
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import javax.imageio.ImageIO
 
 /** What a post puts on the wire, and the handle it returns. */
 internal class PostingIT : BusTest() {
@@ -196,6 +201,49 @@ internal class PostingIT : BusTest() {
         server.awaitNotify().image!!.width shouldBe 1
         notifier.notify(Notification(title = "t", iconBytes = pngOf(0, 0, 0)))
         server.awaitNotify().image!!.width shouldBe 3
+    }
+
+    @Test
+    fun `a big icon goes out scaled to 256 on its longest side, aspect kept`() {
+        val server = daemon()
+        notifier().notify(Notification(title = "t", iconBytes = pngOfSize(1024, 512)))
+        val image = server.awaitNotify().image!!
+        image.width shouldBe 256
+        image.height shouldBe 128
+        image.rowstride shouldBe 256 * 4
+        image.pixels.size shouldBe 256 * 128 * 4
+    }
+
+    @Test
+    fun `an icon claiming an enormous size posts without an image and without decoding it`() {
+        val server = daemon()
+        val notifier = notifier()
+        elapsedMillis {
+            notifier.notify(Notification(title = "t", iconBytes = pngClaiming(30_000, 30_000))) shouldNotBe null
+        } shouldBeLessThan 2_000L
+        val got = server.awaitNotify()
+        got.summary shouldBe "t"
+        got.image shouldBe null
+    }
+
+    @Test
+    fun `decoding an icon never writes it to disk, not even for a moment`() {
+        val server = daemon()
+        val notifier = notifier()
+        // Encoded before the watch starts: writing a PNG through ImageIO caches
+        // to a file of its own, which is the test's doing, not the library's.
+        val icon = Notification(title = "t", iconBytes = pngOfSize(64, 64))
+        // ImageIO caches a stream it reads in a temporary file, deleted again on
+        // close, so the file is gone afterwards either way. Watching its cache
+        // directory catches the creation itself.
+        val cacheDir = Files.createTempDirectory("imageio-cache")
+        ImageIO.setCacheDirectory(cacheDir.toFile())
+        FileSystems.getDefault().newWatchService().use { watch ->
+            cacheDir.register(watch, StandardWatchEventKinds.ENTRY_CREATE)
+            notifier.notify(icon)
+            server.awaitNotify().image shouldNotBe null
+            watch.poll(500, TimeUnit.MILLISECONDS) shouldBe null
+        }
     }
 
     @Test

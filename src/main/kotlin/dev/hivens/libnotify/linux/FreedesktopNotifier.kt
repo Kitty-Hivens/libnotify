@@ -15,11 +15,15 @@ import dev.hivens.libnotify.Subscription
 import dev.hivens.libnotify.Timeout
 import dev.hivens.libnotify.Urgency
 import org.slf4j.LoggerFactory
+import java.awt.AlphaComposite
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.imageio.ImageIO
+import javax.imageio.stream.MemoryCacheImageInputStream
 
 /**
  * Linux notification backend -- `org.freedesktop.Notifications` over the D-Bus
@@ -89,8 +93,15 @@ internal class FreedesktopNotifier private constructor(
 
     override fun notify(notification: Notification): NotificationHandle? {
         if (!open.get()) return null
-        return calls.call("Notify", null, QUEUE_WAIT_MS, WORK_CAP_MS) { doNotify(notification) }
+        // Decoded here, on the caller's thread: a big icon must not hold the one
+        // thread every other call and every event waits for.
+        val own = notification.iconBytes
+        val image = if (own != null) decodeIcon(own) else defaultImage
+        return calls.call("Notify", null, QUEUE_WAIT_MS, WORK_CAP_MS) { doNotify(notification, image) }
     }
+
+    /** The config's fallback icon, decoded once rather than on every post that uses it. */
+    private val defaultImage: RgbaImage? by lazy { config.defaultIconBytes?.let { decodeIcon(it) } }
 
     override fun cancel(handle: NotificationHandle): Boolean {
         if (!open.get()) return false
@@ -186,7 +197,7 @@ internal class FreedesktopNotifier private constructor(
 
     // ── Notify ───────────────────────────────────────────────────────────────
 
-    private fun doNotify(n: Notification): NotificationHandle? {
+    private fun doNotify(n: Notification, image: RgbaImage?): NotificationHandle? {
         if (!ensureConnected()) return null
         Arena.ofConfined().use { call ->
             val body = if (serverParsesBodyMarkup(call)) escapeBodyMarkup(n.body) else n.body
@@ -227,9 +238,7 @@ internal class FreedesktopNotifier private constructor(
                 bindings.appendDictByte(call, hints, "urgency", urgencyByte(n.urgency))
                 n.category?.let { bindings.appendDictString(call, hints, "category", it) }
                 config.appId?.let { bindings.appendDictString(call, hints, "desktop-entry", it) }
-                decodeRgba(n.iconBytes ?: config.defaultIconBytes)?.let {
-                    bindings.appendDictImageData(call, hints, "image-data", it)
-                }
+                image?.let { bindings.appendDictImageData(call, hints, "image-data", it) }
                 bindings.closeContainer(iter, hints)
 
                 // expire_timeout: i
@@ -379,35 +388,6 @@ internal class FreedesktopNotifier private constructor(
     }
 
     private fun nextAnonId(): String = "ln-${anonCounter++}"
-
-    /**
-     * Decode encoded image bytes (PNG, etc.) into tightly packed,
-     * non-premultiplied RGBA for the `image-data` hint. Returns null on a
-     * decode failure or null input -- the notification still posts, just
-     * without the inline image.
-     */
-    private fun decodeRgba(bytes: ByteArray?): RgbaImage? {
-        if (bytes == null) return null
-        return runCatching {
-            val img = ImageIO.read(ByteArrayInputStream(bytes)) ?: return null
-            val w = img.width
-            val h = img.height
-            val argb = IntArray(w * h)
-            img.getRGB(0, 0, w, h, argb, 0, w)
-            val out = ByteArray(w * h * 4)
-            for (i in argb.indices) {
-                val px = argb[i]
-                out[i * 4] = ((px ushr 16) and 0xFF).toByte()      // R
-                out[i * 4 + 1] = ((px ushr 8) and 0xFF).toByte()   // G
-                out[i * 4 + 2] = (px and 0xFF).toByte()            // B
-                out[i * 4 + 3] = ((px ushr 24) and 0xFF).toByte()  // A
-            }
-            RgbaImage(w, h, out)
-        }.getOrElse {
-            log.warn("icon decode failed, posting without image: {}", it.message)
-            null
-        }
-    }
 
     internal companion object {
         private val log = LoggerFactory.getLogger("libnotify.Freedesktop")
@@ -635,6 +615,86 @@ internal class FreedesktopNotifier private constructor(
                 closeEvents = true,
                 urgency = true,
             )
+        }
+
+        /**
+         * The largest image, by its header, that is decoded at all: 4096 by 4096.
+         * A small file can claim a far larger one, and decoding it would allocate
+         * gigabytes before anything checked.
+         */
+        private const val MAX_SOURCE_PIXELS = 4096L * 4096L
+
+        /**
+         * Longest side of the image that goes out. Servers draw notification
+         * images at a few dozen pixels, and every pixel is four bytes in the
+         * message, so a bigger one only costs time and memory on both ends.
+         */
+        private const val ICON_MAX_SIDE = 256
+
+        /**
+         * Decode encoded image bytes (PNG and anything else ImageIO reads) into
+         * tightly packed, non-premultiplied RGBA for the `image-data` hint, scaled
+         * down to [ICON_MAX_SIDE] keeping its aspect. Returns null when the bytes
+         * do not decode or claim more than [MAX_SOURCE_PIXELS]: the notification
+         * still posts, without the image.
+         *
+         * Reads through memory only. ImageIO.read on a stream would cache the
+         * bytes in a temporary file on disk first, which is no place for a
+         * user's avatar or whatever else an icon shows.
+         */
+        internal fun decodeIcon(bytes: ByteArray): RgbaImage? = runCatching {
+            MemoryCacheImageInputStream(ByteArrayInputStream(bytes)).use { input ->
+                val reader = ImageIO.getImageReaders(input).asSequence().firstOrNull() ?: return@use null
+                try {
+                    reader.input = input
+                    val width = reader.getWidth(0)
+                    val height = reader.getHeight(0)
+                    if (width <= 0 || height <= 0 || width.toLong() * height > MAX_SOURCE_PIXELS) {
+                        log.warn("icon claims {}x{} pixels, posting without image", width, height)
+                        return@use null
+                    }
+                    toRgba(scaledToFit(reader.read(0), ICON_MAX_SIDE))
+                } finally {
+                    reader.dispose()
+                }
+            }
+        }.getOrElse {
+            log.warn("icon decode failed, posting without image: {}", it.message)
+            null
+        }
+
+        private fun scaledToFit(image: BufferedImage, maxSide: Int): BufferedImage {
+            val longest = maxOf(image.width, image.height)
+            if (longest <= maxSide) return image
+            val width = maxOf(1, image.width * maxSide / longest)
+            val height = maxOf(1, image.height * maxSide / longest)
+            val scaled = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+            val g = scaled.createGraphics()
+            try {
+                g.composite = AlphaComposite.Src
+                g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+                g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+                g.drawImage(image, 0, 0, width, height, null)
+            } finally {
+                g.dispose()
+            }
+            return scaled
+        }
+
+        private fun toRgba(image: BufferedImage): RgbaImage {
+            val w = image.width
+            val h = image.height
+            val argb = IntArray(w * h)
+            image.getRGB(0, 0, w, h, argb, 0, w)
+            val out = ByteArray(w * h * 4)
+            for (i in argb.indices) {
+                val px = argb[i]
+                out[i * 4] = ((px ushr 16) and 0xFF).toByte()      // R
+                out[i * 4 + 1] = ((px ushr 8) and 0xFF).toByte()   // G
+                out[i * 4 + 2] = (px and 0xFF).toByte()            // B
+                out[i * 4 + 3] = ((px ushr 24) and 0xFF).toByte()  // A
+            }
+            return RgbaImage(w, h, out)
         }
 
         /** Encode plain text for a server that parses the body as XML-based markup. */

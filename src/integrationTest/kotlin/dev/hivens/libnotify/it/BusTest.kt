@@ -10,8 +10,11 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.condition.OS
+import java.awt.Color
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.util.zip.CRC32
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import javax.imageio.ImageIO
@@ -95,6 +98,35 @@ internal fun elapsedMillis(block: () -> Unit): Long {
     val start = System.nanoTime()
     block()
     return (System.nanoTime() - start) / 1_000_000
+}
+
+/** PNG bytes of a [width] by [height] image in one opaque colour. */
+internal fun pngOfSize(width: Int, height: Int): ByteArray {
+    val image = BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB)
+    val g = image.createGraphics()
+    try {
+        g.color = Color(0x33, 0x66, 0x99)
+        g.fillRect(0, 0, width, height)
+    } finally {
+        g.dispose()
+    }
+    return ByteArrayOutputStream().also { ImageIO.write(image, "PNG", it) }.toByteArray()
+}
+
+/**
+ * A tiny valid PNG whose header claims [width] by [height]. The pixel data stays
+ * one pixel's worth, so only a decoder that trusts the header gets hurt.
+ */
+internal fun pngClaiming(width: Int, height: Int): ByteArray {
+    val png = pngOf(0xFF000000.toInt())
+    // Signature (8), IHDR length (4), "IHDR" (4), then width and height at 16 and 20.
+    val buffer = ByteBuffer.wrap(png)
+    buffer.putInt(16, width)
+    buffer.putInt(20, height)
+    // The IHDR CRC at 29 covers its type and its 13 data bytes, 12 to 28.
+    val crc = CRC32().apply { update(png, 12, 17) }
+    buffer.putInt(29, crc.value.toInt())
+    return png
 }
 
 /** PNG bytes of one row of ARGB pixels. */
