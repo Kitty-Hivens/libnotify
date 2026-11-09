@@ -103,6 +103,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   on its own thread.
 - macOS: a `notify` that raced `close()` no longer posts a banner and retains it
   in a notifier that has already let go.
+- macOS: a delegate the host already had on `NSUserNotificationCenter` is kept
+  and put back when the last notifier closes, instead of being replaced for good
+  and then cleared to nil. Creating and closing notifiers at the same time can no
+  longer leave an open one without a delegate.
+- The `Notifier.create` KDoc says when it returns null on each platform. It
+  promised null without a running notification service, while on Linux a
+  session bus is enough and a server that starts later is picked up.
 - The `appId` KDoc says what Linux does with it: it goes out as the
   `desktop-entry` hint. It said the opposite.
 - `SmokeMain` moved into the test source set so it no longer ships in the

@@ -85,11 +85,17 @@ public interface Notifier : AutoCloseable {
 
         /**
          * Detect the host OS, instantiate the matching backend, and return a
-         * live [Notifier]. Returns null when no backend is available -- the OS
-         * isn't recognised, the platform's notification service isn't running,
-         * or the backend's native libraries can't be resolved. Treat null as
-         * "notifications not available here, degrade gracefully" (skip the
-         * banner, don't crash).
+         * live [Notifier]. Returns null when no backend can work here: the OS is
+         * not recognised, the backend's native libraries cannot be loaded, or the
+         * platform refuses to give a notifier at all (no session bus on Linux, no
+         * toast notifier for the app id on Windows, no notification center on
+         * macOS). Treat null as "notifications not available here, degrade
+         * gracefully" (skip the banner, don't crash).
+         *
+         * On Linux a session bus is enough. A notification server is not needed
+         * at this point, since one is often started on the first notification: the
+         * notifier picks it up whenever it appears, and until then [notify]
+         * returns null and [capabilities] holds the specification's baseline.
          */
         @JvmStatic
         public fun create(config: NotifierConfig): Notifier? {

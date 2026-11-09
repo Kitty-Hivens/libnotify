@@ -6,8 +6,10 @@ package dev.hivens.libnotify
  *
  * On Linux these are read from the running notification server's
  * `GetCapabilities` reply: the same daemon (Dunst, Mako, Plasma, GNOME Shell)
- * varies in what it honours. On Windows and macOS they are fixed properties of
- * the chosen API.
+ * varies in what it honours. When no server answered at create time they are
+ * the specification's baseline instead, which assumes actions, icons, urgency,
+ * replacement and close events, and no body markup. On Windows and macOS they
+ * are fixed properties of the chosen API.
  *
  * Reporting a capability as false does not make posting fail: the backend drops
  * the unsupported facet and shows the rest. The flags exist so a consumer can,

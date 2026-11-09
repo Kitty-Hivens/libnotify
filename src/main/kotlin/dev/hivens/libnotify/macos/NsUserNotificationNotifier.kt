@@ -121,19 +121,10 @@ internal class NsUserNotificationNotifier private constructor(
     override fun close() {
         if (!open.compareAndSet(true, false)) return
         events.shutdown()
-        REGISTRY.remove(this)
+        leaveCenter(this, bindings, center)
         // From a listener, the event loop ends once that listener returns.
         if (Thread.currentThread() !== eventThread) eventThread.join(1_000)
         synchronized(this) {
-            // The delegate is a process-shared singleton on the singleton
-            // center; only drop it when no notifier is left, or closing one
-            // would silence activation callbacks for every other open one.
-            if (REGISTRY.isEmpty()) {
-                runCatching {
-                    bindings.handle("objc_msgSend_void_id")
-                        .invokeExact(center, bindings.sel("setDelegate:"), MemorySegment.NULL) as Unit
-                }
-            }
             for (note in delivered.values) {
                 runCatching { bindings.handle("objc_release").invokeExact(note) as Unit }
             }
@@ -311,6 +302,12 @@ internal class NsUserNotificationNotifier private constructor(
         /** Live notifiers, walked by the shared delegate upcall to find the owner of an activated notification. */
         private val REGISTRY = CopyOnWriteArrayList<NsUserNotificationNotifier>()
 
+        /** Guards [REGISTRY] changes together with the delegate swap they cause. */
+        private val DELEGATE_LOCK = Any()
+
+        /** The delegate the center had before libnotify's, retained until it is put back. */
+        private var previousDelegate: MemorySegment = MemorySegment.NULL
+
         // The delegate class + its upcall stubs are built once per JVM and held
         // for the process lifetime (the OS may call the delegate at any time).
         @Volatile private var delegateInstance: MemorySegment = MemorySegment.NULL
@@ -371,17 +368,62 @@ internal class NsUserNotificationNotifier private constructor(
 
             val instance = NsUserNotificationNotifier(bindings, center, capabilitiesFor())
             instance.configIconBytes = config.defaultIconBytes
-            REGISTRY.add(instance)
-            // One delegate object is shared across notifiers (the center is a
-            // process singleton); the last creator installs it, the upcall
-            // routes by notification identity.
-            if (delegateInstance.address() != 0L) {
-                runCatching {
-                    bindings.handle("objc_msgSend_void_id")
-                        .invokeExact(center, bindings.sel("setDelegate:"), delegateInstance) as Unit
+            joinCenter(instance, bindings, center)
+            return instance
+        }
+
+        /**
+         * One delegate object serves every notifier, since the center is a process
+         * singleton: the upcall walks [REGISTRY] and each notifier checks whether
+         * the notification is one of its own.
+         *
+         * A host application, or another library, may already have a delegate on
+         * the center. The first notifier keeps it, retained so it outlives the
+         * swap, and the last one to close puts it back. While any notifier is open
+         * that delegate receives nothing: forwarding to it is not implemented.
+         *
+         * [DELEGATE_LOCK] makes joining and leaving one step each, so a close and a
+         * create running together cannot leave an open notifier with no delegate.
+         */
+        private fun joinCenter(instance: NsUserNotificationNotifier, bindings: ObjcBindings, center: MemorySegment) {
+            synchronized(DELEGATE_LOCK) {
+                if (REGISTRY.isEmpty()) {
+                    val current = runCatching {
+                        bindings.handle("objc_msgSend_id").invokeExact(center, bindings.sel("delegate")) as MemorySegment
+                    }.getOrDefault(MemorySegment.NULL)
+                    if (current.address() != 0L && current.address() != delegateInstance.address()) {
+                        previousDelegate = bindings.handle("objc_retain").invokeExact(current) as MemorySegment
+                        log.warn(
+                            "NSUserNotificationCenter already had a delegate; libnotify takes its place while a " +
+                                "notifier is open and puts it back when the last one closes",
+                        )
+                    }
+                }
+                REGISTRY.add(instance)
+                if (delegateInstance.address() != 0L) {
+                    runCatching {
+                        bindings.handle("objc_msgSend_void_id")
+                            .invokeExact(center, bindings.sel("setDelegate:"), delegateInstance) as Unit
+                    }
                 }
             }
-            return instance
+        }
+
+        private fun leaveCenter(instance: NsUserNotificationNotifier, bindings: ObjcBindings, center: MemorySegment) {
+            synchronized(DELEGATE_LOCK) {
+                REGISTRY.remove(instance)
+                // Only when none is left: closing one notifier must not silence the others.
+                if (REGISTRY.isNotEmpty()) return
+                val restore = previousDelegate
+                runCatching {
+                    bindings.handle("objc_msgSend_void_id")
+                        .invokeExact(center, bindings.sel("setDelegate:"), restore) as Unit
+                }
+                if (restore.address() != 0L) {
+                    runCatching { bindings.handle("objc_release").invokeExact(restore) as Unit }
+                    previousDelegate = MemorySegment.NULL
+                }
+            }
         }
 
         /** Fixed capabilities of the NSUserNotification surface. */

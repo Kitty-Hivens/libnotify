@@ -1,6 +1,7 @@
 package dev.hivens.libnotify.it
 
 import dev.hivens.libnotify.Notifier
+import dev.hivens.libnotify.NotifierCapabilities
 import dev.hivens.libnotify.NotifierConfig
 import io.kotest.matchers.comparables.shouldBeLessThan
 import io.kotest.matchers.shouldBe
@@ -16,8 +17,11 @@ internal class FailureIT : BusTest() {
     fun `create works with no server running and reports the spec baseline`() {
         val notifier = notifier()
         notifier.isOpen shouldBe true
-        notifier.capabilities.replace shouldBe true
-        notifier.capabilities.closeEvents shouldBe true
+        // Exactly the baseline the NotifierCapabilities KDoc promises.
+        notifier.capabilities shouldBe NotifierCapabilities.Builder()
+            .actions(true).maxActions(Int.MAX_VALUE).icons(true).urgency(true).replace(true).closeEvents(true)
+            .bodyMarkup(false)
+            .build()
     }
 
     @Test
