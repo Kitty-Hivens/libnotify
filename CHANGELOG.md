@@ -63,6 +63,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `NotifierCapabilities.Builder`, which starts with every capability off. Its
   constructor, `copy` and `componentN` are gone, so a new capability no longer
   breaks binary compatibility. Reading it is unchanged.
+- Breaking: the event classes `Activated`, `ActionInvoked` and `Dismissed` are
+  plain classes. Their constructors stay public, so a consumer can still feed
+  its own listener in a test, and they still compare by value. `copy` and the
+  `componentN` functions are gone, so a property added later, such as an
+  activation token, breaks no compiled caller. New event types and
+  `DismissReason` values may come too: keep an `else` branch.
 - Breaking: `NotificationAction` is a plain class too. Its constructor and
   equality are unchanged, `copy` and the `componentN` functions are gone.
 - `Notification` and `NotifierConfig` copy their icon bytes on the way in and on

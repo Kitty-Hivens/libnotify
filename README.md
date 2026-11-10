@@ -67,14 +67,15 @@ val notifier = Notifier.create(
     ),
 ) ?: return  // notifications not available here -- degrade gracefully
 
-notifier.onEvent { event ->
+val subscription = notifier.onEvent { event ->
     when (event) {
         is NotificationEvent.Activated     -> focusMainWindow()
         is NotificationEvent.ActionInvoked -> when (event.actionId) {
-            "reply" -> openReply(event.notificationId)
-            "mute"  -> mute(event.notificationId)
+            "open"   -> openDownload(event.notificationId)
+            "folder" -> showInFolder(event.notificationId)
         }
-        is NotificationEvent.Dismissed     -> Unit
+        // Later versions may add event types: let them pass.
+        else -> Unit
     }
 }
 
@@ -95,6 +96,7 @@ val handle = notifier.notify(
 handle?.let { notifier.cancel(it) }
 
 // on shutdown
+subscription.close()
 notifier.close()
 ```
 
@@ -102,18 +104,23 @@ The same from Java:
 
 ```java
 NotifierConfig config = new NotifierConfig.Builder("MyApp").appId("com.example.MyApp").build();
-try (Notifier notifier = Notifier.create(config)) {
-    if (notifier == null) return;  // notifications not available here
-    try (Subscription events = notifier.onEvent(event -> {
-        if (event instanceof NotificationEvent.ActionInvoked invoked) handle(invoked.getActionId());
-    })) {
-        notifier.notify(new Notification.Builder("Download finished")
-                .body("myapp-1.4.0.zip is ready.")
-                .actions(List.of(new NotificationAction("open", "Open")))
-                .tag("download-myapp-140")
-                .build());
-    }
-}
+Notifier notifier = Notifier.create(config);
+if (notifier == null) return;  // notifications not available here
+
+// Keep both open for as long as the app wants clicks: a closed subscription
+// or notifier hears nothing.
+Subscription events = notifier.onEvent(event -> {
+    if (event instanceof NotificationEvent.ActionInvoked invoked) openDownload(invoked.getActionId());
+});
+notifier.notify(new Notification.Builder("Download finished")
+        .body("myapp-1.4.0.zip is ready.")
+        .actions(List.of(new NotificationAction("open", "Open")))
+        .tag("download-myapp-140")
+        .build());
+
+// on shutdown
+events.close();
+notifier.close();
 ```
 
 `appId` doubles as the Windows AUMID and the Linux `desktop-entry` hint, which

@@ -55,10 +55,6 @@ public abstract interface class dev/hivens/libnotify/NotificationEvent {
 
 public final class dev/hivens/libnotify/NotificationEvent$ActionInvoked : dev/hivens/libnotify/NotificationEvent {
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun component2 ()Ljava/lang/String;
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;)Ldev/hivens/libnotify/NotificationEvent$ActionInvoked;
-	public static synthetic fun copy$default (Ldev/hivens/libnotify/NotificationEvent$ActionInvoked;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ldev/hivens/libnotify/NotificationEvent$ActionInvoked;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getActionId ()Ljava/lang/String;
 	public fun getNotificationId ()Ljava/lang/String;
@@ -68,9 +64,6 @@ public final class dev/hivens/libnotify/NotificationEvent$ActionInvoked : dev/hi
 
 public final class dev/hivens/libnotify/NotificationEvent$Activated : dev/hivens/libnotify/NotificationEvent {
 	public fun <init> (Ljava/lang/String;)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun copy (Ljava/lang/String;)Ldev/hivens/libnotify/NotificationEvent$Activated;
-	public static synthetic fun copy$default (Ldev/hivens/libnotify/NotificationEvent$Activated;Ljava/lang/String;ILjava/lang/Object;)Ldev/hivens/libnotify/NotificationEvent$Activated;
 	public fun equals (Ljava/lang/Object;)Z
 	public fun getNotificationId ()Ljava/lang/String;
 	public fun hashCode ()I
@@ -79,10 +72,6 @@ public final class dev/hivens/libnotify/NotificationEvent$Activated : dev/hivens
 
 public final class dev/hivens/libnotify/NotificationEvent$Dismissed : dev/hivens/libnotify/NotificationEvent {
 	public fun <init> (Ljava/lang/String;Ldev/hivens/libnotify/DismissReason;)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun component2 ()Ldev/hivens/libnotify/DismissReason;
-	public final fun copy (Ljava/lang/String;Ldev/hivens/libnotify/DismissReason;)Ldev/hivens/libnotify/NotificationEvent$Dismissed;
-	public static synthetic fun copy$default (Ldev/hivens/libnotify/NotificationEvent$Dismissed;Ljava/lang/String;Ldev/hivens/libnotify/DismissReason;ILjava/lang/Object;)Ldev/hivens/libnotify/NotificationEvent$Dismissed;
 	public fun equals (Ljava/lang/Object;)Z
 	public fun getNotificationId ()Ljava/lang/String;
 	public final fun getReason ()Ldev/hivens/libnotify/DismissReason;
