@@ -3,9 +3,12 @@
 All notable changes to libnotify will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.2.0]
 
 ### Fixed
+- Linux: the scratch buffer for `DBusMessageIter` is aligned for the pointers
+  libdbus writes into it. It was declared as bytes, so nothing but malloc's own
+  generosity kept it aligned.
 - Linux: a notification id counts only from the server that issued it. Any
   client on the session bus could send `ActionInvoked` and pass for a click, a
   click on an action the notification never offered was passed on, and after a
@@ -135,6 +138,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   session bus is enough and a server that starts later is picked up.
 - The `appId` KDoc says what Linux does with it: it goes out as the
   `desktop-entry` hint. It said the opposite.
+- Built with Kotlin 2.4.21. The library depends on its standard library and on
+  `slf4j-api` 2.0.20, which consumers get transitively.
 - `SmokeMain` moved into the test source set so it no longer ships in the
   published library jar. It was packaged in 0.1.0 through 0.1.2, so the next
   release drops `dev.hivens.libnotify.SmokeMainKt` from the artifact -- it was
