@@ -99,9 +99,7 @@ kotlin {
     // The public API as a committed text dump (api/). check fails when the
     // compiled API drifts from it, so every API change shows up in review as a
     // diff of that file. Accept a deliberate change with updateKotlinAbi.
-    abiValidation {
-        enabled.set(true)
-    }
+    abiValidation()
 }
 
 tasks.named("check") {
