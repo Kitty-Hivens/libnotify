@@ -4,6 +4,7 @@ import dev.hivens.libnotify.DEFAULT_ACTION_ID
 import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.DispatchCalls
 import dev.hivens.libnotify.EventListeners
+import dev.hivens.libnotify.HandleIssuer
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationHandle
@@ -71,7 +72,7 @@ internal class FreedesktopNotifier private constructor(
     // concurrent access despite the public API being callable from any thread.
     private val publicToServer = HashMap<String, Long>()
     private val serverToPublic = HashMap<Long, String>()
-    private var anonCounter = 0L
+    private val handles = HandleIssuer()
 
     // Null until a server has answered GetCapabilities. Dispatch-thread-owned
     // once that thread starts, same as the maps above.
@@ -104,7 +105,7 @@ internal class FreedesktopNotifier private constructor(
     private val defaultImage: RgbaImage? by lazy { config.defaultIconBytes?.let { decodeIcon(it) } }
 
     override fun cancel(handle: NotificationHandle): Boolean {
-        if (!open.get()) return false
+        if (!open.get() || !handles.issued(handle)) return false
         return calls.call("CloseNotification", false, QUEUE_WAIT_MS, WORK_CAP_MS) { doCancel(handle) }
     }
 
@@ -245,13 +246,13 @@ internal class FreedesktopNotifier private constructor(
                 bindings.appendInt32(call, iter, expireMillis(n.timeout))
 
                 val serverId = sendAndReadUint32(call, msg) ?: return null
-                val publicId = n.tag ?: nextAnonId()
+                val publicId = n.tag ?: handles.nextId()
                 // Drop any prior mapping under this public id (replace case).
                 publicToServer[publicId]?.let { serverToPublic.remove(it) }
                 val key = serverId.toLong() and 0xFFFF_FFFFL
                 publicToServer[publicId] = key
                 serverToPublic[key] = publicId
-                return NotificationHandle(publicId)
+                return handles.handle(publicId)
             } finally {
                 runCatching { bindings.handle("dbus_message_unref").invokeExact(msg) as Unit }
             }
@@ -387,7 +388,6 @@ internal class FreedesktopNotifier private constructor(
         return (CAP_BODY_MARKUP in advertised).also { bodyMarkup = it }
     }
 
-    private fun nextAnonId(): String = "ln-${anonCounter++}"
 
     internal companion object {
         private val log = LoggerFactory.getLogger("libnotify.Freedesktop")

@@ -21,7 +21,8 @@ internal class TestDoubleTest {
         @Volatile var closed = false
         override val isOpen: Boolean get() = !closed
         override val capabilities = NotifierCapabilities.Builder().actions(true).maxActions(2).build()
-        override fun notify(notification: Notification): NotificationHandle? = null
+        override fun notify(notification: Notification): NotificationHandle? =
+            NotificationHandle(notification.tag ?: "fake")
         override fun cancel(handle: NotificationHandle): Boolean = false
         override fun onEvent(listener: NotificationListener): Subscription = Subscription { }
         override fun close() {
@@ -36,6 +37,8 @@ internal class TestDoubleTest {
         fake.capabilities.maxActions shouldBe 2
         fake.capabilities.urgency shouldBe false
         fake.onEvent { _: NotificationEvent -> }.close()
+        // A double can hand back handles of its own.
+        fake.notify(Notification(title = "t", tag = "x")) shouldBe NotificationHandle("x")
         fake.use { }
         fake.isOpen shouldBe false
     }

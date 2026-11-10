@@ -69,6 +69,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `componentN` functions are gone, so a property added later, such as an
   activation token, breaks no compiled caller. New event types and
   `DismissReason` values may come too: keep an `else` branch.
+- Breaking: `NotificationHandle` is a plain class that belongs to the notifier
+  that issued it. `cancel` on another notifier returns false even for the same
+  id: two notifiers posting the same tag could cancel each other's banner. Its
+  new public constructor makes a handle for a `Notifier` test double, which a
+  real notifier refuses.
+- Generated ids carry a random prefix per notifier. They counted `ln-0`, `ln-1`
+  and so on in every notifier and every run, so they matched an obvious tag,
+  each other, and on Windows and macOS the previous run's banners, which a new
+  run then replaced.
 - Breaking: `NotificationAction` is a plain class too. Its constructor and
   equality are unchanged, `copy` and the `componentN` functions are gone.
 - `Notification` and `NotifierConfig` copy their icon bytes on the way in and on

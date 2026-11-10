@@ -111,36 +111,4 @@ internal class KnownGapsIT : BusTest() {
         got.appIcon shouldBe "dialog-warning"
         gap { got.image shouldBe null }
     }
-
-    @Test
-    fun `a user tag cannot collide with a generated id`() = knownGap("generated ids are predictable") {
-        val server = daemon()
-        val notifier = notifier()
-        val generated = notifier.notify(titled("generated")) ?: error("the post failed, so this proves nothing")
-        server.awaitNotify()
-        notifier.notify(titled("tagged", tag = generated.id)) shouldNotBe null
-        val got = server.awaitNotify()
-        gap { got.replacesId shouldBe 0 }
-    }
-
-    @Test
-    fun `generated ids are not reused by another notifier`() = knownGap("each notifier counts from zero") {
-        daemon()
-        val first = notifier().notify(titled("t")) ?: error("the first post failed, so this proves nothing")
-        val second = notifier().notify(titled("t")) ?: error("the second post failed, so this proves nothing")
-        gap { first.id shouldNotBe second.id }
-    }
-
-    @Test
-    fun `a handle cannot cancel another notifier's notification`() = knownGap("a handle is only an id, not bound to its notifier") {
-        val server = daemon()
-        val owner = notifier()
-        val other = notifier()
-        val handle = owner.notify(titled("owner's")) ?: error("the post failed, so this proves nothing")
-        server.awaitNotify()
-        other.notify(titled("other's")) ?: error("the post failed, so this proves nothing")
-        server.awaitNotify()
-        val cancelled = other.cancel(handle)
-        gap { cancelled shouldBe false }
-    }
 }

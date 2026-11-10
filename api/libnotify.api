@@ -80,7 +80,7 @@ public final class dev/hivens/libnotify/NotificationEvent$Dismissed : dev/hivens
 }
 
 public final class dev/hivens/libnotify/NotificationHandle {
-	public final fun component1 ()Ljava/lang/String;
+	public fun <init> (Ljava/lang/String;)V
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getId ()Ljava/lang/String;
 	public fun hashCode ()I

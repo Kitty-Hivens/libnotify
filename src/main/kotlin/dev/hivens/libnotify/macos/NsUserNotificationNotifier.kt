@@ -3,6 +3,7 @@ package dev.hivens.libnotify.macos
 import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.DispatchCalls
 import dev.hivens.libnotify.EventListeners
+import dev.hivens.libnotify.HandleIssuer
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationHandle
@@ -22,7 +23,6 @@ import java.lang.invoke.MethodType
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * macOS notification backend on `NSUserNotificationCenter` via the Objective-C
@@ -64,6 +64,7 @@ internal class NsUserNotificationNotifier private constructor(
 
     private val open = AtomicBoolean(true)
     private val listeners = EventListeners(log)
+    private val handles = HandleIssuer()
 
     // Concurrent because the activation delegate ([handleActivation]) reads these
     // on the Cocoa main thread while notify/cancel/close mutate them under
@@ -98,7 +99,7 @@ internal class NsUserNotificationNotifier private constructor(
     }
 
     override fun cancel(handle: NotificationHandle): Boolean {
-        if (!open.get()) return false
+        if (!open.get() || !handles.issued(handle)) return false
         return events.call("cancel", false, QUEUE_WAIT_MS, WORK_CAP_MS) {
             val removed = synchronized(this) { open.get() && removeDelivered(handle.id) }
             // NSUserNotification reports no dismissals, but this one the library
@@ -145,7 +146,7 @@ internal class NsUserNotificationNotifier private constructor(
             voidId(note, "setTitle:", bindings.nsString(n.title))
             if (n.body.isNotEmpty()) voidId(note, "setInformativeText:", bindings.nsString(n.body))
 
-            val publicId = n.tag ?: nextAnonId()
+            val publicId = n.tag ?: handles.nextId()
             // Identifier drives replace-in-place: delivering a second
             // notification with the same identifier swaps the banner (10.9+).
             voidId(note, "setIdentifier:", bindings.nsString(publicId))
@@ -164,7 +165,7 @@ internal class NsUserNotificationNotifier private constructor(
                     runCatching { bindings.handle("objc_release").invokeExact(old) as Unit }
                 }
             }
-            NotificationHandle(publicId)
+            handles.handle(publicId)
         }
     }
 
@@ -287,7 +288,6 @@ internal class NsUserNotificationNotifier private constructor(
 
     internal companion object {
         private val log = LoggerFactory.getLogger("libnotify.NSUserNotification")
-        private val anonCounter = AtomicLong(0)
 
         /** How long a cancel may wait for the event thread before it is dropped unsent. */
         private const val QUEUE_WAIT_MS = 1_000L
@@ -314,7 +314,6 @@ internal class NsUserNotificationNotifier private constructor(
         @Volatile private var stubArena: Arena? = null
         @Volatile private var lastBindings: ObjcBindings? = null
 
-        private fun nextAnonId(): String = "ln-${anonCounter.getAndIncrement()}"
 
         /**
          * `-userNotificationCenter:didActivateNotification:` IMP. ObjC calls it

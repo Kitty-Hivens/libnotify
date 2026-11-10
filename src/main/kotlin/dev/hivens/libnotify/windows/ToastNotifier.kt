@@ -4,6 +4,7 @@ import dev.hivens.libnotify.DEFAULT_ACTION_ID
 import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.DispatchCalls
 import dev.hivens.libnotify.EventListeners
+import dev.hivens.libnotify.HandleIssuer
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationHandle
@@ -25,7 +26,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Windows notification backend on `Windows.UI.Notifications.ToastNotification`
@@ -72,6 +72,7 @@ internal class ToastNotifier private constructor(
     private val open = AtomicBoolean(true)
     private val listeners = EventListeners(log)
     private val calls = DispatchCalls(log)
+    private val handles = HandleIssuer()
 
     // Written by the dispatch thread at startup, read by it thereafter.
     @Volatile private var notifier: MemorySegment = MemorySegment.NULL
@@ -107,7 +108,7 @@ internal class ToastNotifier private constructor(
     }
 
     override fun cancel(handle: NotificationHandle): Boolean {
-        if (!open.get()) return false
+        if (!open.get() || !handles.issued(handle)) return false
         return calls.call("Toast hide", false, QUEUE_WAIT_MS, WORK_CAP_MS) { doCancel(handle) }
     }
 
@@ -220,7 +221,7 @@ internal class ToastNotifier private constructor(
                     bindings.release(toast)
                     return null
                 }
-                val publicId = n.tag ?: nextAnonId()
+                val publicId = n.tag ?: handles.nextId()
                 setTag(call, toast, publicId)
                 wireHandlers(call, toast)
 
@@ -242,7 +243,7 @@ internal class ToastNotifier private constructor(
                 untrack(publicId)
                 deliveredToasts[publicId] = Delivered(toast, identity)
                 idByIdentity[identity] = publicId
-                return NotificationHandle(publicId)
+                return handles.handle(publicId)
             } finally {
                 bindings.release(xmlDoc)
             }
@@ -368,7 +369,6 @@ internal class ToastNotifier private constructor(
 
     private fun fire(event: NotificationEvent) = listeners.fire(event)
 
-    private fun nextAnonId(): String = "ln-${anonCounter.getAndIncrement()}"
 
     /** Write image bytes to a temp PNG and return its `file:///` URI, content-cached. Null if no bytes / on failure. */
     private fun resolveImageUri(bytes: ByteArray?): String? {
@@ -387,7 +387,6 @@ internal class ToastNotifier private constructor(
 
     internal companion object {
         private val log = LoggerFactory.getLogger("libnotify.Toast")
-        private val anonCounter = AtomicLong(0)
 
         /** How long a call may wait for the dispatch thread before it is dropped unsent. */
         private const val QUEUE_WAIT_MS = 1_000L

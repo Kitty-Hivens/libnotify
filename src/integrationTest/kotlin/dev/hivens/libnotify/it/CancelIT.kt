@@ -2,6 +2,7 @@ package dev.hivens.libnotify.it
 
 import dev.hivens.libnotify.DismissReason
 import dev.hivens.libnotify.NotificationEvent
+import dev.hivens.libnotify.NotificationHandle
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
 
@@ -52,6 +53,30 @@ internal class CancelIT : BusTest() {
         val handle = owner.notify(titled("t", tag = "t"))!!
         server.awaitNotify()
         other.cancel(handle) shouldBe false
+        server.assertNoCloseRequest()
+    }
+
+    @Test
+    fun `a handle cannot cancel another notifier's notification, even with the same id`() {
+        val server = daemon()
+        val owner = notifier()
+        val other = notifier()
+        val handle = owner.notify(titled("owner's", tag = "shared")) ?: error("the post failed, so this proves nothing")
+        server.awaitNotify()
+        other.notify(titled("other's", tag = "shared")) ?: error("the post failed, so this proves nothing")
+        server.awaitNotify()
+        other.cancel(handle) shouldBe false
+        server.assertNoCloseRequest()
+        owner.cancel(handle) shouldBe true
+    }
+
+    @Test
+    fun `a handle no notifier issued is refused`() {
+        val server = daemon()
+        val notifier = notifier()
+        notifier.notify(titled("t", tag = "t")) ?: error("the post failed, so this proves nothing")
+        server.awaitNotify()
+        notifier.cancel(NotificationHandle("t")) shouldBe false
         server.assertNoCloseRequest()
     }
 

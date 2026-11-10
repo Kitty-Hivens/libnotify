@@ -77,6 +77,29 @@ internal class PostingIT : BusTest() {
     }
 
     @Test
+    fun `a tag a caller would pick does not collide with a generated id`() {
+        val server = daemon()
+        val notifier = notifier()
+        val generated = notifier.notify(titled("generated")) ?: error("the post failed, so this proves nothing")
+        server.awaitNotify()
+        // The ids 0.1.x generated, and the obvious guesses at them.
+        for (tag in listOf("ln-0", "ln-1", "0", "1")) {
+            notifier.notify(titled("tagged", tag = tag)) shouldNotBe null
+            server.awaitNotify().replacesId shouldBe 0
+        }
+        generated.id shouldNotBe "ln-0"
+    }
+
+    @Test
+    fun `generated ids differ between notifiers`() {
+        daemon()
+        val first = notifier().notify(titled("t")) ?: error("the first post failed, so this proves nothing")
+        val second = notifier().notify(titled("t")) ?: error("the second post failed, so this proves nothing")
+        first.id shouldNotBe second.id
+        first.id.substringBeforeLast('-') shouldNotBe second.id.substringBeforeLast('-')
+    }
+
+    @Test
     fun `reposting a live tag replaces its banner`() {
         val server = daemon()
         val notifier = notifier()
