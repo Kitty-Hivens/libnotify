@@ -9,6 +9,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   JAVA_VERSION: '22'
   JAVA_DISTRIBUTION: 'temurin'
@@ -19,17 +22,53 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: ${{ env.JAVA_DISTRIBUTION }}
           java-version: ${{ env.JAVA_VERSION }}
       - uses: gradle/actions/setup-gradle@v6
+      # The integration suite starts its own private bus.
+      - name: Install dbus-daemon
+        run: command -v dbus-daemon || (sudo apt-get update && sudo apt-get install -y dbus)
       - name: Build + test
         run: ./gradlew build --stacktrace
-      - name: Upload test report on failure
+      - name: Upload test reports on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: test-results
-          path: build/reports/tests/test
+          name: test-reports-linux
+          path: |
+            build/reports/tests
+            build/test-results
+          retention-days: 7
+
+  # The Windows and macOS backends have no daemon to fake, so this runs them for
+  # real: unit tests, plus a smoke test that drives the native backend end to end.
+  platforms:
+    name: Build & test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ windows-latest, macos-latest ]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          java-version: ${{ env.JAVA_VERSION }}
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Test
+        shell: bash
+        run: ./gradlew check --stacktrace
+      # Kept on success too: the smoke test's output says what the native
+      # backend actually did on this runner.
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports-${{ matrix.os }}
+          path: |
+            build/reports/tests
+            build/test-results
           retention-days: 7

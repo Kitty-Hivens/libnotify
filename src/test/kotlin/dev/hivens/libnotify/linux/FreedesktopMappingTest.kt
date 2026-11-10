@@ -44,6 +44,23 @@ class FreedesktopMappingTest {
     }
 
     @Test
+    fun `body markup escaping keeps text literal`() {
+        FreedesktopNotifier.escapeBodyMarkup("AT&T <b>report<final>.pdf") shouldBe
+            "AT&amp;T &lt;b&gt;report&lt;final&gt;.pdf"
+    }
+
+    @Test
+    fun `body markup escaping does not touch anything else`() {
+        val text = "plain 'quoted' \"text\"\nна второй строке"
+        FreedesktopNotifier.escapeBodyMarkup(text) shouldBe text
+    }
+
+    @Test
+    fun `an already escaped entity stays literal`() {
+        FreedesktopNotifier.escapeBodyMarkup("&amp;") shouldBe "&amp;amp;"
+    }
+
+    @Test
     fun `urgency maps to the spec byte`() {
         FreedesktopNotifier.urgencyByte(Urgency.LOW) shouldBe 0.toByte()
         FreedesktopNotifier.urgencyByte(Urgency.NORMAL) shouldBe 1.toByte()

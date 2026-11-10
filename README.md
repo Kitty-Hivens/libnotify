@@ -62,19 +62,20 @@ import dev.hivens.libnotify.*
 val notifier = Notifier.create(
     NotifierConfig(
         appName = "MyApp",
-        appId = "Kitty-Hivens.MyApp",            // Windows AUMID; ignored elsewhere
+        appId = "com.example.MyApp",             // Windows AUMID and Linux desktop-entry
         defaultIconBytes = Files.readAllBytes(Path.of("icon.png")),
     ),
 ) ?: return  // notifications not available here -- degrade gracefully
 
-notifier.onEvent { event ->
+val subscription = notifier.onEvent { event ->
     when (event) {
         is NotificationEvent.Activated     -> focusMainWindow()
         is NotificationEvent.ActionInvoked -> when (event.actionId) {
-            "reply" -> openReply(event.notificationId)
-            "mute"  -> mute(event.notificationId)
+            "open"   -> openDownload(event.notificationId)
+            "folder" -> showInFolder(event.notificationId)
         }
-        is NotificationEvent.Dismissed     -> Unit
+        // Later versions may add event types: let them pass.
+        else -> Unit
     }
 }
 
@@ -95,8 +96,36 @@ val handle = notifier.notify(
 handle?.let { notifier.cancel(it) }
 
 // on shutdown
+subscription.close()
 notifier.close()
 ```
+
+The same from Java:
+
+```java
+NotifierConfig config = new NotifierConfig.Builder("MyApp").appId("com.example.MyApp").build();
+Notifier notifier = Notifier.create(config);
+if (notifier == null) return;  // notifications not available here
+
+// Keep both open for as long as the app wants clicks: a closed subscription
+// or notifier hears nothing.
+Subscription events = notifier.onEvent(event -> {
+    if (event instanceof NotificationEvent.ActionInvoked invoked) openDownload(invoked.getActionId());
+});
+notifier.notify(new Notification.Builder("Download finished")
+        .body("myapp-1.4.0.zip is ready.")
+        .actions(List.of(new NotificationAction("open", "Open")))
+        .tag("download-myapp-140")
+        .build());
+
+// on shutdown
+events.close();
+notifier.close();
+```
+
+`appId` doubles as the Windows AUMID and the Linux `desktop-entry` hint, which
+notification servers group by. A reverse-DNS id that matches your `.desktop`
+file name serves both.
 
 Read [`NotifierCapabilities`](src/main/kotlin/dev/hivens/libnotify/NotifierCapabilities.kt)
 (`notifier.capabilities`) to adapt before posting -- on Linux it reflects the
@@ -112,9 +141,19 @@ the post.
   available; `notify` returns null and `cancel` returns false on failure.
   Notifications are non-essential UX -- a daemon restart or an unregistered
   AUMID becomes "no banner", never a crashed host.
-- **Events run on a backend thread.** `onEvent` handlers fire on the D-Bus pump
-  (Linux), a WinRT threadpool thread (Windows), or the Cocoa run loop (macOS).
-  Hop to your UI thread yourself before touching UI state.
+- **`notify` blocks.** It waits for the notification service to answer, up to
+  several seconds if the service hangs, so call it off your UI thread. A handle
+  means the service accepted the post, not that anyone saw it: do-not-disturb
+  accepts and shows nothing.
+- **Events arrive in order, on one thread.** Each notifier delivers all its events
+  on a thread of its own, one at a time, on every platform. A listener needs no
+  locking for its own state, but should stay short. Hop to your UI thread
+  yourself before touching UI state.
+- **`cancel` reports back before it returns.** A successful `cancel` delivers
+  exactly one `Dismissed` with reason `CLOSED` before returning, so it never
+  lands after a new post that reuses the tag. Called from a listener, it is
+  delivered right after the current event instead, since a listener is never
+  entered twice at once.
 - **Replace by tag.** A [`Notification.tag`] reused while the prior banner is
   live replaces it in place where the platform supports it.
 - **`Activated` vs `ActionInvoked`.** A click on the body is `Activated`; a

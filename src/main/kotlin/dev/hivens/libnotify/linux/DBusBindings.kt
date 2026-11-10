@@ -102,6 +102,10 @@ internal class DBusBindings private constructor(
                 null,                                                  // void
                 listOf(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),     // conn, dbus_bool_t
             ),
+            Triple("dbus_connection_get_is_connected",
+                ValueLayout.JAVA_INT,                                  // dbus_bool_t
+                listOf(ValueLayout.ADDRESS),
+            ),
             Triple("dbus_connection_read_write",
                 ValueLayout.JAVA_INT,                                  // dbus_bool_t
                 listOf(ValueLayout.ADDRESS, ValueLayout.JAVA_INT),     // conn, timeout_ms
@@ -145,6 +149,14 @@ internal class DBusBindings private constructor(
                 listOf(ValueLayout.ADDRESS),
             ),
             Triple("dbus_message_get_interface",
+                ValueLayout.ADDRESS,
+                listOf(ValueLayout.ADDRESS),
+            ),
+            Triple("dbus_message_get_sender",
+                ValueLayout.ADDRESS,                                   // unique bus name, or NULL
+                listOf(ValueLayout.ADDRESS),
+            ),
+            Triple("dbus_message_get_path",
                 ValueLayout.ADDRESS,
                 listOf(ValueLayout.ADDRESS),
             ),
@@ -257,8 +269,12 @@ internal class DBusBindings private constructor(
      * dummies + an int pad, then two trailing pointers ending at offset 72),
      * so a 64-byte buffer let libdbus write 8 bytes past the allocation on
      * every `dbus_message_iter_*` call -- silent arena corruption. Reserve 80.
+     *
+     * Declared as longs, not bytes: libdbus writes pointers into it, and a byte
+     * sequence asks for an alignment of 1. It only worked because malloc hands
+     * out 16-byte-aligned memory anyway, which nothing here promised.
      */
-    val messageIterLayout: MemoryLayout = MemoryLayout.sequenceLayout(80, ValueLayout.JAVA_BYTE)
+    val messageIterLayout: MemoryLayout = MemoryLayout.sequenceLayout(10, ValueLayout.JAVA_LONG)
 }
 
 /**

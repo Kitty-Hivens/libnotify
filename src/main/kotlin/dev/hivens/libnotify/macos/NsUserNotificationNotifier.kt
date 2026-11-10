@@ -1,11 +1,17 @@
 package dev.hivens.libnotify.macos
 
+import dev.hivens.libnotify.DismissReason
+import dev.hivens.libnotify.DispatchCalls
+import dev.hivens.libnotify.EventListeners
+import dev.hivens.libnotify.HandleIssuer
 import dev.hivens.libnotify.Notification
 import dev.hivens.libnotify.NotificationEvent
 import dev.hivens.libnotify.NotificationHandle
+import dev.hivens.libnotify.NotificationListener
 import dev.hivens.libnotify.Notifier
 import dev.hivens.libnotify.NotifierCapabilities
 import dev.hivens.libnotify.NotifierConfig
+import dev.hivens.libnotify.Subscription
 import org.slf4j.LoggerFactory
 import java.lang.foreign.Arena
 import java.lang.foreign.FunctionDescriptor
@@ -17,7 +23,6 @@ import java.lang.invoke.MethodType
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * macOS notification backend on `NSUserNotificationCenter` via the Objective-C
@@ -42,6 +47,12 @@ import java.util.concurrent.atomic.AtomicLong
  * runs that loop already; a headless process must run `[NSApp run]` on the
  * `-XstartOnFirstThread` main thread (the smoke harness does) or activation
  * events never fire.
+ *
+ * **Events.** Each notifier has an [eventThread] that delivers every event, so
+ * listeners run one at a time and in order, never on the Cocoa main thread or a
+ * caller's thread. The delegate reads what an activation needs off the
+ * notification on the main thread and hands it over. [cancel] runs on the event
+ * thread too, so removing the banner and delivering its Dismissed are one step.
  */
 internal class NsUserNotificationNotifier private constructor(
     private val bindings: ObjcBindings,
@@ -52,7 +63,8 @@ internal class NsUserNotificationNotifier private constructor(
     private val log = LoggerFactory.getLogger("libnotify.NSUserNotification")
 
     private val open = AtomicBoolean(true)
-    private val handlers = CopyOnWriteArrayList<(NotificationEvent) -> Unit>()
+    private val listeners = EventListeners(log)
+    private val handles = HandleIssuer()
 
     // Concurrent because the activation delegate ([handleActivation]) reads these
     // on the Cocoa main thread while notify/cancel/close mutate them under
@@ -64,38 +76,56 @@ internal class NsUserNotificationNotifier private constructor(
     /** publicId -> the first action's id, recovered when the main action button (activationType 2) fires. */
     private val firstActionId = ConcurrentHashMap<String, String>()
 
+    /** Work for the [eventThread]: cancels, and events handed over from the delegate. */
+    private val events = DispatchCalls(log)
+
+    private val eventThread = Thread({ eventLoop() }, "libnotify-ns-events-${ProcessHandle.current().pid()}").apply {
+        isDaemon = true
+    }
+
+    init {
+        events.ownedBy(eventThread)
+        eventThread.start()
+    }
+
     override val isOpen: Boolean get() = open.get()
 
     override fun notify(notification: Notification): NotificationHandle? {
         if (!open.get()) return null
-        return runCatching { synchronized(this) { deliver(notification) } }
+        // Checked again under the lock: a notify that raced close() must not
+        // post into, and retain a note for, a notifier that already let go.
+        return runCatching { synchronized(this) { if (open.get()) deliver(notification) else null } }
             .getOrElse { log.warn("notify threw: {}", it.message); null }
     }
 
     override fun cancel(handle: NotificationHandle): Boolean {
-        if (!open.get()) return false
-        return runCatching { synchronized(this) { removeDelivered(handle.id) } }
-            .getOrElse { log.warn("cancel threw: {}", it.message); false }
+        if (!open.get() || !handles.issued(handle)) return false
+        return events.call("cancel", false, QUEUE_WAIT_MS, WORK_CAP_MS) {
+            val removed = synchronized(this) { open.get() && removeDelivered(handle.id) }
+            // NSUserNotification reports no dismissals, but this one the library
+            // made itself. Fired outside the lock, so a listener may call back in.
+            if (removed) fire(NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED))
+            removed
+        }
     }
 
-    override fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit {
-        handlers.add(handler)
-        return { handlers.remove(handler) }
+    override fun onEvent(listener: NotificationListener): Subscription = listeners.add(listener)
+
+    private fun eventLoop() {
+        try {
+            while (open.get()) events.runQueued(100)
+        } finally {
+            events.shutdown()
+        }
     }
 
     override fun close() {
         if (!open.compareAndSet(true, false)) return
-        REGISTRY.remove(this)
+        events.shutdown()
+        leaveCenter(this, bindings, center)
+        // From a listener, the event loop ends once that listener returns.
+        if (Thread.currentThread() !== eventThread) eventThread.join(1_000)
         synchronized(this) {
-            // The delegate is a process-shared singleton on the singleton
-            // center; only drop it when no notifier is left, or closing one
-            // would silence activation callbacks for every other open one.
-            if (REGISTRY.isEmpty()) {
-                runCatching {
-                    bindings.handle("objc_msgSend_void_id")
-                        .invokeExact(center, bindings.sel("setDelegate:"), MemorySegment.NULL) as Unit
-                }
-            }
             for (note in delivered.values) {
                 runCatching { bindings.handle("objc_release").invokeExact(note) as Unit }
             }
@@ -116,7 +146,7 @@ internal class NsUserNotificationNotifier private constructor(
             voidId(note, "setTitle:", bindings.nsString(n.title))
             if (n.body.isNotEmpty()) voidId(note, "setInformativeText:", bindings.nsString(n.body))
 
-            val publicId = n.tag ?: nextAnonId()
+            val publicId = n.tag ?: handles.nextId()
             // Identifier drives replace-in-place: delivering a second
             // notification with the same identifier swaps the banner (10.9+).
             voidId(note, "setIdentifier:", bindings.nsString(publicId))
@@ -135,7 +165,7 @@ internal class NsUserNotificationNotifier private constructor(
                     runCatching { bindings.handle("objc_release").invokeExact(old) as Unit }
                 }
             }
-            NotificationHandle(publicId)
+            handles.handle(publicId)
         }
     }
 
@@ -199,29 +229,37 @@ internal class NsUserNotificationNotifier private constructor(
 
     // ── Activation routing (called from the static delegate upcall) ──────────
 
+    /**
+     * Runs on the Cocoa main thread, where [note] is valid: reads the identifier,
+     * the activation type and any additional action's id, then hands the event to
+     * the [eventThread]. Whether the notification is still ours is decided there,
+     * in order with cancels.
+     */
     private fun handleActivation(note: MemorySegment) {
         val publicId = bindings.jvmString(msgId(note, "identifier")) ?: return
         if (!delivered.containsKey(publicId)) return  // not ours
-        when ((bindings.handle("objc_msgSend_long").invokeExact(note, bindings.sel("activationType")) as Long).toInt()) {
-            ACTIVATION_CONTENTS_CLICKED -> fire(NotificationEvent.Activated(publicId))
-            ACTIVATION_ACTION_BUTTON -> firstActionId[publicId]?.let {
-                fire(NotificationEvent.ActionInvoked(publicId, it))
-            }
-            ACTIVATION_ADDITIONAL_ACTION -> {
-                val action = msgId(note, "additionalActivationAction")
-                bindings.jvmString(msgId(action, "identifier"))?.let {
+        val type = (bindings.handle("objc_msgSend_long").invokeExact(note, bindings.sel("activationType")) as Long).toInt()
+        val additionalId = if (type == ACTIVATION_ADDITIONAL_ACTION) {
+            bindings.jvmString(msgId(msgId(note, "additionalActivationAction"), "identifier"))
+        } else {
+            null
+        }
+        events.post("activation") {
+            if (!delivered.containsKey(publicId)) return@post
+            when (type) {
+                ACTIVATION_CONTENTS_CLICKED -> fire(NotificationEvent.Activated(publicId))
+                ACTIVATION_ACTION_BUTTON -> firstActionId[publicId]?.let {
                     fire(NotificationEvent.ActionInvoked(publicId, it))
                 }
+                ACTIVATION_ADDITIONAL_ACTION -> additionalId?.let {
+                    fire(NotificationEvent.ActionInvoked(publicId, it))
+                }
+                else -> Unit  // None / Replied: nothing to surface
             }
-            else -> Unit  // None / Replied -- nothing to surface
         }
     }
 
-    private fun fire(event: NotificationEvent) {
-        for (h in handlers) {
-            runCatching { h(event) }.onFailure { log.warn("onEvent handler threw: {}", it.message) }
-        }
-    }
+    private fun fire(event: NotificationEvent) = listeners.fire(event)
 
     // ── msgSend conveniences ─────────────────────────────────────────────────
 
@@ -250,7 +288,12 @@ internal class NsUserNotificationNotifier private constructor(
 
     internal companion object {
         private val log = LoggerFactory.getLogger("libnotify.NSUserNotification")
-        private val anonCounter = AtomicLong(0)
+
+        /** How long a cancel may wait for the event thread before it is dropped unsent. */
+        private const val QUEUE_WAIT_MS = 1_000L
+
+        /** Bounds a started cancel, which makes two Cocoa calls and runs the listeners. */
+        private const val WORK_CAP_MS = 5_000L
 
         private const val ACTIVATION_CONTENTS_CLICKED = 1
         private const val ACTIVATION_ACTION_BUTTON = 2
@@ -259,13 +302,18 @@ internal class NsUserNotificationNotifier private constructor(
         /** Live notifiers, walked by the shared delegate upcall to find the owner of an activated notification. */
         private val REGISTRY = CopyOnWriteArrayList<NsUserNotificationNotifier>()
 
+        /** Guards [REGISTRY] changes together with the delegate swap they cause. */
+        private val DELEGATE_LOCK = Any()
+
+        /** The delegate the center had before libnotify's, retained until it is put back. */
+        private var previousDelegate: MemorySegment = MemorySegment.NULL
+
         // The delegate class + its upcall stubs are built once per JVM and held
         // for the process lifetime (the OS may call the delegate at any time).
         @Volatile private var delegateInstance: MemorySegment = MemorySegment.NULL
         @Volatile private var stubArena: Arena? = null
         @Volatile private var lastBindings: ObjcBindings? = null
 
-        private fun nextAnonId(): String = "ln-${anonCounter.getAndIncrement()}"
 
         /**
          * `-userNotificationCenter:didActivateNotification:` IMP. ObjC calls it
@@ -319,17 +367,62 @@ internal class NsUserNotificationNotifier private constructor(
 
             val instance = NsUserNotificationNotifier(bindings, center, capabilitiesFor())
             instance.configIconBytes = config.defaultIconBytes
-            REGISTRY.add(instance)
-            // One delegate object is shared across notifiers (the center is a
-            // process singleton); the last creator installs it, the upcall
-            // routes by notification identity.
-            if (delegateInstance.address() != 0L) {
-                runCatching {
-                    bindings.handle("objc_msgSend_void_id")
-                        .invokeExact(center, bindings.sel("setDelegate:"), delegateInstance) as Unit
+            joinCenter(instance, bindings, center)
+            return instance
+        }
+
+        /**
+         * One delegate object serves every notifier, since the center is a process
+         * singleton: the upcall walks [REGISTRY] and each notifier checks whether
+         * the notification is one of its own.
+         *
+         * A host application, or another library, may already have a delegate on
+         * the center. The first notifier keeps it, retained so it outlives the
+         * swap, and the last one to close puts it back. While any notifier is open
+         * that delegate receives nothing: forwarding to it is not implemented.
+         *
+         * [DELEGATE_LOCK] makes joining and leaving one step each, so a close and a
+         * create running together cannot leave an open notifier with no delegate.
+         */
+        private fun joinCenter(instance: NsUserNotificationNotifier, bindings: ObjcBindings, center: MemorySegment) {
+            synchronized(DELEGATE_LOCK) {
+                if (REGISTRY.isEmpty()) {
+                    val current = runCatching {
+                        bindings.handle("objc_msgSend_id").invokeExact(center, bindings.sel("delegate")) as MemorySegment
+                    }.getOrDefault(MemorySegment.NULL)
+                    if (current.address() != 0L && current.address() != delegateInstance.address()) {
+                        previousDelegate = bindings.handle("objc_retain").invokeExact(current) as MemorySegment
+                        log.warn(
+                            "NSUserNotificationCenter already had a delegate; libnotify takes its place while a " +
+                                "notifier is open and puts it back when the last one closes",
+                        )
+                    }
+                }
+                REGISTRY.add(instance)
+                if (delegateInstance.address() != 0L) {
+                    runCatching {
+                        bindings.handle("objc_msgSend_void_id")
+                            .invokeExact(center, bindings.sel("setDelegate:"), delegateInstance) as Unit
+                    }
                 }
             }
-            return instance
+        }
+
+        private fun leaveCenter(instance: NsUserNotificationNotifier, bindings: ObjcBindings, center: MemorySegment) {
+            synchronized(DELEGATE_LOCK) {
+                REGISTRY.remove(instance)
+                // Only when none is left: closing one notifier must not silence the others.
+                if (REGISTRY.isNotEmpty()) return
+                val restore = previousDelegate
+                runCatching {
+                    bindings.handle("objc_msgSend_void_id")
+                        .invokeExact(center, bindings.sel("setDelegate:"), restore) as Unit
+                }
+                if (restore.address() != 0L) {
+                    runCatching { bindings.handle("objc_release").invokeExact(restore) as Unit }
+                    previousDelegate = MemorySegment.NULL
+                }
+            }
         }
 
         /** Fixed capabilities of the NSUserNotification surface. */

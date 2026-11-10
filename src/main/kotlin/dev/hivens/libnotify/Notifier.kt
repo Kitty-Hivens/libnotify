@@ -1,5 +1,8 @@
 package dev.hivens.libnotify
 
+import dev.hivens.libnotify.linux.FreedesktopNotifier
+import dev.hivens.libnotify.macos.NsUserNotificationNotifier
+import dev.hivens.libnotify.windows.ToastNotifier
 import org.slf4j.LoggerFactory
 
 /**
@@ -9,11 +12,18 @@ import org.slf4j.LoggerFactory
  * `use { }`). Post notifications with [notify], cancel them with [cancel],
  * react to clicks via [onEvent].
  *
- * Threading: implementations do not pin the caller to a specific thread.
- * Backend-side event dispatch runs on a thread the backend owns (a D-Bus
- * signal pump on Linux, a WinRT delegate thread on Windows, the Cocoa run loop
- * on macOS); the [onEvent] handler is invoked there. A consumer that wants to
- * touch UI state should hop itself (e.g. `withContext(Dispatchers.Main)`).
+ * Threading: any thread may call the methods. Every event of one notifier is
+ * delivered on one thread the notifier owns, one at a time and in the order the
+ * notifier learned of them, on every platform: never on the caller's thread, the
+ * Cocoa main thread or a Windows threadpool thread. So a listener needs no
+ * locking for state only listeners touch. A consumer that wants to touch UI
+ * state hops to its UI thread itself, for example with
+ * `SwingUtilities.invokeLater` or a coroutine launched on `Dispatchers.Main`.
+ *
+ * Implementing it is supported, for test doubles in the first place: build the
+ * [capabilities] with [NotifierCapabilities.Builder]. A method added to this
+ * interface later comes with a default implementation, so an existing double
+ * keeps compiling and linking.
  *
  * No-throw philosophy: notifications are a non-essential UX surface. [notify]
  * returns null and [cancel] returns false on failure rather than throwing, so a
@@ -35,9 +45,18 @@ public interface Notifier : AutoCloseable {
     /**
      * Post a notification. Returns a [NotificationHandle] whose [id] every
      * resulting [NotificationEvent] carries, or null if the backend could not
-     * post it (closed notifier, server error). When [Notification.tag] is set
-     * and a notification with that tag is still live, this replaces it in place
-     * where the backend supports replacement.
+     * post it (closed notifier, server error, no answer in time). When
+     * [Notification.tag] is set and a notification with that tag is still live,
+     * this replaces it in place where the backend supports replacement.
+     *
+     * A handle means the notification service accepted the post, not that anyone
+     * saw it: do-not-disturb, for one, accepts and shows nothing. Null means it
+     * was not accepted, with one limit: a request already sent cannot be recalled,
+     * so a service that answers after the timeout can still show it.
+     *
+     * Blocks the calling thread until the service answers. Against a hung service
+     * that is up to several seconds, so a UI thread should call this elsewhere,
+     * for example `withContext(Dispatchers.IO) { notifier.notify(n) }`.
      */
     public fun notify(notification: Notification): NotificationHandle?
 
@@ -49,11 +68,11 @@ public interface Notifier : AutoCloseable {
     public fun cancel(handle: NotificationHandle): Boolean
 
     /**
-     * Subscribe to notification events. The handler runs on the backend's
-     * dispatch thread (see class KDoc). The returned function unsubscribes the
-     * handler when invoked; idempotent.
+     * Subscribe to notification events. The listener runs on the backend's
+     * dispatch thread (see class KDoc), and may call [notify], [cancel] and
+     * [close] from there. Close the returned [Subscription] to stop delivery.
      */
-    public fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit
+    public fun onEvent(listener: NotificationListener): Subscription
 
     /**
      * Release backend resources. Cancels nothing already on screen -- shown
@@ -66,22 +85,26 @@ public interface Notifier : AutoCloseable {
 
         /**
          * Detect the host OS, instantiate the matching backend, and return a
-         * live [Notifier]. Returns null when no backend is available -- the OS
-         * isn't recognised, the platform's notification service isn't running,
-         * or the backend's native libraries can't be resolved. Treat null as
-         * "notifications not available here, degrade gracefully" (skip the
-         * banner, don't crash).
+         * live [Notifier]. Returns null when no backend can work here: the OS is
+         * not recognised, the backend's native libraries cannot be loaded, or the
+         * platform refuses to give a notifier at all (no session bus on Linux, no
+         * toast notifier for the app id on Windows, no notification center on
+         * macOS). Treat null as "notifications not available here, degrade
+         * gracefully" (skip the banner, don't crash).
+         *
+         * On Linux a session bus is enough. A notification server is not needed
+         * at this point, since one is often started on the first notification: the
+         * notifier picks it up whenever it appears, and until then [notify]
+         * returns null and [capabilities] holds the specification's baseline.
          */
+        @JvmStatic
         public fun create(config: NotifierConfig): Notifier? {
             val osName = System.getProperty("os.name", "").lowercase()
             val backend: Notifier? = runCatching {
                 when {
-                    osName.contains("linux") || osName.contains("bsd") ->
-                        dev.hivens.libnotify.linux.FreedesktopNotifier.create(config)
-                    osName.contains("windows") ->
-                        dev.hivens.libnotify.windows.ToastNotifier.create(config)
-                    osName.contains("mac") || osName.contains("darwin") ->
-                        dev.hivens.libnotify.macos.NsUserNotificationNotifier.create(config)
+                    osName.contains("linux") || osName.contains("bsd") -> FreedesktopNotifier.create(config)
+                    osName.contains("windows") -> ToastNotifier.create(config)
+                    osName.contains("mac") || osName.contains("darwin") -> NsUserNotificationNotifier.create(config)
                     else -> null
                 }
             }.onFailure {
