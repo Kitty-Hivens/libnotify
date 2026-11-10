@@ -128,7 +128,8 @@ tasks.withType<Test>().configureEach {
     val integration = name == "integrationTest"
     val maxSkipped = providers.gradleProperty("maxSkippedTests").map { it.toInt() }.getOrElse(
         when {
-            !integration -> 0
+            // DBusLayoutTest's two tests need libdbus, so they skip elsewhere.
+            !integration -> if (hostIsLinux) 0 else 2
             hostIsLinux -> 1
             else -> Int.MAX_VALUE
         },
