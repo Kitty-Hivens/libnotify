@@ -16,7 +16,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   replacement and its notifications, reusing the same numbers, reported as ours.
   Ids are now paired with the issuing server's unique bus name, signals count
   only from that name and the service's object path, actions are checked against
-  the post, and the body-markup stance is asked again of a new server.
+  the post, and the body-markup stance is asked again of a new server. To know
+  that name, each `notify` and `cancel` first asks the bus who owns the service,
+  one extra round trip to the bus daemon, which answers even when the server
+  hangs.
+- Linux: a failed `AddMatch` is logged. Its error landed in the `DBusError` and
+  nothing read it, so a notifier that would never hear a click or a close said
+  nothing about it. `capabilities.closeEvents` still reports true in that case.
 - Linux: a notifier survives a restart of the session bus. The next call opens a
   new connection, so the host application has nothing to do. It used to stay
   dead for good while `isOpen` kept reporting true. Notifications posted before
@@ -54,7 +60,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   exits, so a slow daemon delays the release instead of leaking the connection.
 - Linux: `cancel()` returns false when the daemon gave no reply. It returned
   true unconditionally, so a caller was told the banner had been taken down when
-  nothing had heard the request -- `Notifier.cancel` documents true as meaning
+  nothing had heard the request. `Notifier.cancel` documents true as meaning
   the backend accepted it.
 - Linux: `create()` releases the Panama arena when there is no session bus, and
   releases both the arena and the private connection if setup throws after the
@@ -82,9 +88,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `DismissReason` values may come too: keep an `else` branch.
 - Breaking: `NotificationHandle` is a plain class that belongs to the notifier
   that issued it. `cancel` on another notifier returns false even for the same
-  id: two notifiers posting the same tag could cancel each other's banner. Its
-  new public constructor makes a handle for a `Notifier` test double, which a
-  real notifier refuses.
+  id: two notifiers posting the same tag could cancel each other's banner. Two
+  handles are equal when both the id and the issuing notifier match, `component1`
+  is gone, and the id must be non-blank. Its new public constructor
+  makes a handle for a `Notifier` test double, which a real notifier refuses.
 - Generated ids carry a random prefix per notifier. They counted `ln-0`, `ln-1`
   and so on in every notifier and every run, so they matched an obvious tag,
   each other, and on Windows and macOS the previous run's banners, which a new
@@ -107,8 +114,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     `NotifierCapabilities.Builder().build()`, plus a setter per capability the
     double should claim, and `override fun onEvent(handler: (NotificationEvent) -> Unit): () -> Unit`
     becomes `override fun onEvent(listener: NotificationListener): Subscription`.
-- `Notifier.create` is a static method for Java callers, and the empty
-  `NotificationAction.Companion` is gone.
+- `Notifier.create` is a static method for Java callers, and
+  `NotificationAction.Companion` is gone. It held only the reserved action id,
+  internal to Kotlin but readable from Java as `NotificationAction.DEFAULT_ID`.
+  The reserved id stays `"default"`.
 - A successful `cancel` produces exactly one `Dismissed(CLOSED)` on every
   platform, delivered before `cancel` returns, or right after the current event
   when called from a listener. Linux sent it whenever the server's signal got
@@ -138,12 +147,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   session bus is enough and a server that starts later is picked up.
 - The `appId` KDoc says what Linux does with it: it goes out as the
   `desktop-entry` hint. It said the opposite.
-- Built with Kotlin 2.4.21. The library depends on its standard library and on
-  `slf4j-api` 2.0.20, which consumers get transitively.
-- `SmokeMain` moved into the test source set so it no longer ships in the
-  published library jar. It was packaged in 0.1.0 through 0.1.2, so the next
-  release drops `dev.hivens.libnotify.SmokeMainKt` from the artifact -- it was
-  an interactive harness with a `main`, never API.
+- Linux: the dispatch thread wakes ten times a second instead of forty. A click
+  or a close the server reports can sit in the socket up to 100 ms before it is
+  read, up from 25. Calls the library makes go out at once as before, since
+  queued work wakes the thread whatever the interval.
+- Built with Kotlin 2.4.21 (was 2.3.21). The library depends on its standard
+  library and on `slf4j-api` 2.0.20 (was 2.0.16), which consumers get
+  transitively.
+- `SmokeMain` moved into the test source set, so this release drops
+  `dev.hivens.libnotify.SmokeMainKt` from the published jar. It shipped in 0.1.0
+  through 0.1.2 as an interactive harness with a `main`, never API.
+
+### Notes
+- Releases are built, signed and uploaded by CI from the version tag. From
+  0.2.0 the artifacts are signed with the key `7461A72089CC3794`, while 0.1.0
+  through 0.1.2 were signed with `880EA95290372FFB`. Both are published on
+  keys.openpgp.org under the same identity.
+- `-PskipSigning` builds and publishes without signing, for a `mavenLocal`
+  publish or JitPack, where no key is available.
+- CI runs the Windows and macOS backends on real runners: create, post, replace
+  by tag, cancel and the `Dismissed` after it all succeed. That shows the native
+  calls work, not that a banner was visible, and click callbacks remain
+  untested on both.
+- Known gaps, each pinned by a test that fails once it closes: on Linux a NUL in
+  the title or body cuts the text off there, and default icon bytes outrank a
+  notification's own `iconName` on the server. On Windows a character XML 1.0
+  forbids, such as a control character or a lone surrogate, makes the toast
+  payload malformed.
 
 ## [0.1.2]
 
