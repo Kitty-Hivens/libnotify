@@ -44,7 +44,7 @@ that affects them without grokking the others.
 
 ```kotlin
 dependencies {
-    implementation("dev.hivens:libnotify:0.1.0")
+    implementation("dev.hivens:libnotify:0.2.0")
 }
 ```
 
