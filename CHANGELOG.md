@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
+- Linux: a notification id counts only from the server that issued it. Any
+  client on the session bus could send `ActionInvoked` and pass for a click, a
+  click on an action the notification never offered was passed on, and after a
+  notification daemon restart the old ids were offered to the new server for
+  replacement and its notifications, reusing the same numbers, reported as ours.
+  Ids are now paired with the issuing server's unique bus name, signals count
+  only from that name and the service's object path, actions are checked against
+  the post, and the body-markup stance is asked again of a new server.
 - Linux: a notifier survives a restart of the session bus. The next call opens a
   new connection, so the host application has nothing to do. It used to stay
   dead for good while `isOpen` kept reporting true. Notifications posted before

@@ -152,6 +152,14 @@ internal class DBusBindings private constructor(
                 ValueLayout.ADDRESS,
                 listOf(ValueLayout.ADDRESS),
             ),
+            Triple("dbus_message_get_sender",
+                ValueLayout.ADDRESS,                                   // unique bus name, or NULL
+                listOf(ValueLayout.ADDRESS),
+            ),
+            Triple("dbus_message_get_path",
+                ValueLayout.ADDRESS,
+                listOf(ValueLayout.ADDRESS),
+            ),
 
             // Iterator API
             Triple("dbus_message_iter_init",

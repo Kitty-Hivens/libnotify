@@ -50,13 +50,28 @@ import javax.imageio.stream.MemoryCacheImageInputStream
  * connection, so a restarted bus needs nothing from the host application. What
  * belonged to the old bus is dropped with it: notifications posted before no
  * longer report events and cannot be cancelled.
+ *
+ * **Whose ids.** A server's notification id only means something to that server.
+ * Every id this backend keeps is paired with the unique bus name of the server
+ * that issued it, read off the reply, and a signal counts only when it comes
+ * from that same name and the service's object path. So a client posing as the
+ * server, or a restarted server reusing a number, cannot reach a notification
+ * that is not its own, and a tag is never offered for replacement to a server
+ * that did not issue its id. The body-markup stance is kept per server for the
+ * same reason.
  */
+/** A notification as one server knows it: the unique bus name of that server, and its id there. */
+internal data class ServerRef(val owner: String, val id: Long)
+
+/** Whether the server with unique bus name [owner] parses the body as markup. */
+internal class ServerMarkup(val owner: String, val parsesMarkup: Boolean)
+
 internal class FreedesktopNotifier private constructor(
     private val bindings: DBusBindings,
     initialConnection: MemorySegment,
     private val config: NotifierConfig,
     override val capabilities: NotifierCapabilities,
-    advertisedBodyMarkup: Boolean?,
+    advertisedMarkup: ServerMarkup?,
 ) : Notifier {
 
     private val log = LoggerFactory.getLogger("libnotify.Freedesktop")
@@ -68,15 +83,18 @@ internal class FreedesktopNotifier private constructor(
     private val calls = DispatchCalls(log)
 
     // These maps are touched ONLY on the dispatch thread (doNotify, doCancel,
-    // dispatchSignal all run there), so plain HashMaps are safe -- no
-    // concurrent access despite the public API being callable from any thread.
-    private val publicToServer = HashMap<String, Long>()
-    private val serverToPublic = HashMap<Long, String>()
+    // dispatchSignal all run there), so plain HashMaps are safe: no concurrent
+    // access despite the public API being callable from any thread.
+    private val publicToServer = HashMap<String, ServerRef>()
+    private val serverToPublic = HashMap<ServerRef, String>()
+
+    /** The action ids each notification offered: a click on any other is not passed on. */
+    private val offeredActions = HashMap<ServerRef, Set<String>>()
     private val handles = HandleIssuer()
 
     // Null until a server has answered GetCapabilities. Dispatch-thread-owned
     // once that thread starts, same as the maps above.
-    private var bodyMarkup: Boolean? = advertisedBodyMarkup
+    private var markup: ServerMarkup? = advertisedMarkup
 
     // Replaced by ensureConnected when the bus drops. Dispatch-thread-owned.
     private var connection: MemorySegment = initialConnection
@@ -191,9 +209,24 @@ internal class FreedesktopNotifier private constructor(
         connection = fresh
         publicToServer.clear()
         serverToPublic.clear()
-        bodyMarkup = null
+        offeredActions.clear()
+        markup = null
         log.info("reconnected to the session bus")
         return true
+    }
+
+    /** Dispatch thread only. Drop a notification's mappings. */
+    private fun forget(ref: ServerRef) {
+        serverToPublic.remove(ref)?.let { publicToServer.remove(it) }
+        offeredActions.remove(ref)
+    }
+
+    /**
+     * Dispatch thread only. Drop everything another server issued: once [owner]
+     * answers for the service, the others' notifications went away with them.
+     */
+    private fun forgetAllBut(owner: String) {
+        serverToPublic.keys.filter { it.owner != owner }.forEach { forget(it) }
     }
 
     // ── Notify ───────────────────────────────────────────────────────────────
@@ -201,7 +234,9 @@ internal class FreedesktopNotifier private constructor(
     private fun doNotify(n: Notification, image: RgbaImage?): NotificationHandle? {
         if (!ensureConnected()) return null
         Arena.ofConfined().use { call ->
-            val body = if (serverParsesBodyMarkup(call)) escapeBodyMarkup(n.body) else n.body
+            // Null when nobody owns the service yet: the Notify may still start one.
+            val owner = currentOwner(call)
+            val body = if (serverParsesBodyMarkup(call, owner)) escapeBodyMarkup(n.body) else n.body
             val msg = newCall(call, "Notify") ?: return null
             try {
                 val iter = call.allocate(bindings.messageIterLayout)
@@ -210,7 +245,9 @@ internal class FreedesktopNotifier private constructor(
                 bindings.appendString(call, iter, DBusBindings.DBUS_TYPE_STRING, config.appName)
                 // replaces_id: reuse the live server id for this tag, so the
                 // daemon swaps the banner in place instead of stacking a new one.
-                val replacesId = n.tag?.let { publicToServer[it] }?.toInt() ?: 0
+                // Only to the server that issued it: to any other the number is
+                // meaningless, or worse, another application's notification.
+                val replacesId = n.tag?.let { publicToServer[it] }?.takeIf { it.owner == owner }?.id?.toInt() ?: 0
                 bindings.appendUint32(call, iter, replacesId)
                 bindings.appendString(call, iter, DBusBindings.DBUS_TYPE_STRING,
                     n.iconName ?: config.defaultIconName ?: "")
@@ -245,13 +282,15 @@ internal class FreedesktopNotifier private constructor(
                 // expire_timeout: i
                 bindings.appendInt32(call, iter, expireMillis(n.timeout))
 
-                val serverId = sendAndReadUint32(call, msg) ?: return null
+                val (serverId, repliedBy) = sendNotify(call, msg) ?: return null
+                forgetAllBut(repliedBy)
                 val publicId = n.tag ?: handles.nextId()
                 // Drop any prior mapping under this public id (replace case).
-                publicToServer[publicId]?.let { serverToPublic.remove(it) }
-                val key = serverId.toLong() and 0xFFFF_FFFFL
-                publicToServer[publicId] = key
-                serverToPublic[key] = publicId
+                publicToServer[publicId]?.let { forget(it) }
+                val ref = ServerRef(repliedBy, serverId.toLong() and 0xFFFF_FFFFL)
+                publicToServer[publicId] = ref
+                serverToPublic[ref] = publicId
+                offeredActions[ref] = n.actions.mapTo(HashSet()) { it.id }
                 return handles.handle(publicId)
             } finally {
                 runCatching { bindings.handle("dbus_message_unref").invokeExact(msg) as Unit }
@@ -261,13 +300,19 @@ internal class FreedesktopNotifier private constructor(
 
     private fun doCancel(handle: NotificationHandle): Boolean {
         if (!ensureConnected()) return false
-        val serverId = publicToServer[handle.id] ?: return false
+        val ref = publicToServer[handle.id] ?: return false
         Arena.ofConfined().use { call ->
+            // A server that is no longer the owner took its notifications with it,
+            // and its number may now be another application's.
+            if (currentOwner(call) != ref.owner) {
+                forget(ref)
+                return false
+            }
             val msg = newCall(call, "CloseNotification") ?: return false
             try {
                 val iter = call.allocate(bindings.messageIterLayout)
                 bindings.handle("dbus_message_iter_init_append").invokeExact(msg, iter) as Unit
-                bindings.appendUint32(call, iter, serverId.toInt())
+                bindings.appendUint32(call, iter, ref.id.toInt())
                 val error = call.allocate(bindings.errorLayout)
                 bindings.handle("dbus_error_init").invokeExact(error) as Unit
                 val reply = bindings.handle("dbus_connection_send_with_reply_and_block")
@@ -293,14 +338,16 @@ internal class FreedesktopNotifier private constructor(
         // after the queued calls, by which time a repost of the same tag may
         // have gone out with this id. Settling it here delivers the event before
         // cancel returns, and the late signal finds no mapping and is dropped.
-        serverToPublic.remove(serverId)
-        publicToServer.remove(handle.id)
+        forget(ref)
         fire(NotificationEvent.Dismissed(handle.id, DismissReason.CLOSED))
         return true
     }
 
-    /** Send [msg] with a blocking reply and read a single uint32 out of it (the Notify id). */
-    private fun sendAndReadUint32(call: Arena, msg: MemorySegment): Int? {
+    /**
+     * Send a Notify with a blocking reply. Returns the id the server assigned and
+     * the unique bus name of the server that assigned it.
+     */
+    private fun sendNotify(call: Arena, msg: MemorySegment): Pair<Int, String>? {
         val error = call.allocate(bindings.errorLayout)
         bindings.handle("dbus_error_init").invokeExact(error) as Unit
         val reply = bindings.handle("dbus_connection_send_with_reply_and_block")
@@ -311,11 +358,51 @@ internal class FreedesktopNotifier private constructor(
             return null
         }
         try {
+            val sender = bindings.readMessageString("dbus_message_get_sender", reply) ?: return null
             val rIter = call.allocate(bindings.messageIterLayout)
             if ((bindings.handle("dbus_message_iter_init").invokeExact(reply, rIter) as Int) == 0) return null
-            return bindings.readUint32(call, rIter)
+            val id = bindings.readUint32(call, rIter) ?: return null
+            return id to sender
         } finally {
             runCatching { bindings.handle("dbus_message_unref").invokeExact(reply) as Unit }
+        }
+    }
+
+    /**
+     * The unique bus name that owns the notification service right now, asked of
+     * the bus itself, or null when nobody does. Answered by the bus, not by the
+     * server, so a hung server does not stall it.
+     */
+    private fun currentOwner(call: Arena): String? {
+        val msg = bindings.handle("dbus_message_new_method_call").invokeExact(
+            call.allocateUtf8(DBUS_NAME),
+            call.allocateUtf8(DBUS_PATH),
+            call.allocateUtf8(DBUS_NAME),
+            call.allocateUtf8("GetNameOwner"),
+        ) as MemorySegment
+        if (msg.address() == 0L) return null
+        try {
+            val iter = call.allocate(bindings.messageIterLayout)
+            bindings.handle("dbus_message_iter_init_append").invokeExact(msg, iter) as Unit
+            bindings.appendString(call, iter, DBusBindings.DBUS_TYPE_STRING, BUS_NAME)
+            val error = call.allocate(bindings.errorLayout)
+            bindings.handle("dbus_error_init").invokeExact(error) as Unit
+            val reply = bindings.handle("dbus_connection_send_with_reply_and_block")
+                .invokeExact(connection, msg, CAPABILITIES_TIMEOUT_MS, error) as MemorySegment
+            if (reply.address() == 0L) {
+                // NameHasNoOwner, the usual answer before a server first starts.
+                freeErrorIfSet(error)
+                return null
+            }
+            try {
+                val rIter = call.allocate(bindings.messageIterLayout)
+                if ((bindings.handle("dbus_message_iter_init").invokeExact(reply, rIter) as Int) == 0) return null
+                return bindings.readString(call, rIter)
+            } finally {
+                runCatching { bindings.handle("dbus_message_unref").invokeExact(reply) as Unit }
+            }
+        } finally {
+            runCatching { bindings.handle("dbus_message_unref").invokeExact(msg) as Unit }
         }
     }
 
@@ -325,6 +412,9 @@ internal class FreedesktopNotifier private constructor(
         if ((bindings.handle("dbus_message_get_type").invokeExact(msg) as Int) != DBusBindings.DBUS_MESSAGE_TYPE_SIGNAL) return
         val iface = bindings.readMessageString("dbus_message_get_interface", msg) ?: return
         if (iface != IFACE) return
+        if (bindings.readMessageString("dbus_message_get_path", msg) != OBJECT_PATH) return
+        // Paired with the id below: only the server that issued an id speaks for it.
+        val sender = bindings.readMessageString("dbus_message_get_sender", msg) ?: return
         val member = bindings.readMessageString("dbus_message_get_member", msg) ?: return
 
         Arena.ofConfined().use { call ->
@@ -335,23 +425,24 @@ internal class FreedesktopNotifier private constructor(
                     val serverId = bindings.readUint32(call, iter) ?: return
                     bindings.handle("dbus_message_iter_next").invokeExact(iter) as Int
                     val key = bindings.readString(call, iter) ?: return
-                    val publicId = serverToPublic[serverId.toLong() and 0xFFFF_FFFFL] ?: return
-                    if (key == DEFAULT_ACTION_ID) {
-                        fire(NotificationEvent.Activated(publicId))
-                    } else {
-                        fire(NotificationEvent.ActionInvoked(publicId, key))
+                    val ref = ServerRef(sender, serverId.toLong() and 0xFFFF_FFFFL)
+                    val publicId = serverToPublic[ref] ?: return
+                    when {
+                        key == DEFAULT_ACTION_ID -> fire(NotificationEvent.Activated(publicId))
+                        key in offeredActions[ref].orEmpty() -> fire(NotificationEvent.ActionInvoked(publicId, key))
+                        else -> log.warn("dropping a click on action '{}', which {} never offered", key, publicId)
                     }
                 }
                 "NotificationClosed" -> {
                     val serverId = bindings.readUint32(call, iter) ?: return
                     bindings.handle("dbus_message_iter_next").invokeExact(iter) as Int
                     val reason = bindings.readUint32(call, iter) ?: 4
-                    val key = serverId.toLong() and 0xFFFF_FFFFL
-                    val publicId = serverToPublic.remove(key) ?: return
-                    publicToServer.remove(publicId)
+                    val ref = ServerRef(sender, serverId.toLong() and 0xFFFF_FFFFL)
+                    val publicId = serverToPublic[ref] ?: return
+                    forget(ref)
                     fire(NotificationEvent.Dismissed(publicId, mapReason(reason)))
                 }
-                else -> Unit  // ActivationToken and friends -- ignore
+                else -> Unit  // ActivationToken and friends: ignored for now
             }
         }
     }
@@ -377,15 +468,16 @@ internal class FreedesktopNotifier private constructor(
     }
 
     /**
-     * Whether the server treats the body as markup. A server that was absent at
-     * create time may have started since, so an unknown answer is asked again
-     * on every post until one replies. With no reply the text goes unescaped:
-     * a server without the capability would show the entities literally.
+     * Whether the server that owns the service now treats the body as markup.
+     * The answer is kept per server: one that was absent at create time, or that
+     * replaced the server we last asked, is asked again. With no reply the text
+     * goes unescaped: a server without the capability would show the entities
+     * literally.
      */
-    private fun serverParsesBodyMarkup(call: Arena): Boolean {
-        bodyMarkup?.let { return it }
+    private fun serverParsesBodyMarkup(call: Arena, owner: String?): Boolean {
+        markup?.let { if (owner != null && it.owner == owner) return it.parsesMarkup }
         val advertised = queryCapabilities(bindings, connection, call, CAPABILITIES_TIMEOUT_MS) ?: return false
-        return (CAP_BODY_MARKUP in advertised).also { bodyMarkup = it }
+        return ServerMarkup(advertised.second, CAP_BODY_MARKUP in advertised.first).also { markup = it }.parsesMarkup
     }
 
 
@@ -396,6 +488,10 @@ internal class FreedesktopNotifier private constructor(
         private const val OBJECT_PATH = "/org/freedesktop/Notifications"
         private const val IFACE = "org.freedesktop.Notifications"
         private const val CAP_BODY_MARKUP = "body-markup"
+
+        /** The bus itself, which answers who owns a name. */
+        private const val DBUS_NAME = "org.freedesktop.DBus"
+        private const val DBUS_PATH = "/org/freedesktop/DBus"
 
         /** Shorter than a post's reply timeout, so asking first does not double the wait on a hung server. */
         private const val CAPABILITIES_TIMEOUT_MS = 2_000
@@ -422,8 +518,12 @@ internal class FreedesktopNotifier private constructor(
          */
         private const val QUEUE_WAIT_MS = 1_000L
 
-        /** Safety net over the native timeouts a started call is already bounded by. */
-        private const val WORK_CAP_MS = CAPABILITIES_TIMEOUT_MS + REPLY_TIMEOUT_MS + 1_000L
+        /**
+         * Safety net over the native timeouts a started call is already bounded
+         * by: asking the bus for the owner, asking the server for its
+         * capabilities, then the call itself.
+         */
+        private const val WORK_CAP_MS = 2L * CAPABILITIES_TIMEOUT_MS + REPLY_TIMEOUT_MS + 1_000L
 
         /**
          * How long close() waits for the dispatch thread.
@@ -460,8 +560,8 @@ internal class FreedesktopNotifier private constructor(
                     bindings,
                     conn,
                     config,
-                    parseCapabilities(advertised),
-                    advertised?.let { CAP_BODY_MARKUP in it },
+                    parseCapabilities(advertised?.first),
+                    advertised?.let { ServerMarkup(it.second, CAP_BODY_MARKUP in it.first) },
                 )
             } catch (t: Throwable) {
                 log.info("notifier setup failed after connecting: {}", t.message)
@@ -493,9 +593,11 @@ internal class FreedesktopNotifier private constructor(
             try {
                 // Don't let a dropped session bus _exit() the host application.
                 bindings.handle("dbus_connection_set_exit_on_disconnect").invokeExact(conn, 0) as Unit
-                // Subscribe to ActionInvoked + NotificationClosed. Not fatal if it
-                // fails: fire-and-forget notifications still work.
-                val rule = arena.allocateUtf8("type='signal',interface='$IFACE'")
+                // Subscribe to ActionInvoked + NotificationClosed from whoever owns
+                // the service. Not fatal if it fails: fire-and-forget notifications
+                // still work. The bus filters broadcasts by this rule, but a signal
+                // sent to us directly bypasses it, so dispatchSignal checks too.
+                val rule = arena.allocateUtf8("type='signal',sender='$BUS_NAME',path='$OBJECT_PATH',interface='$IFACE'")
                 bindings.handle("dbus_bus_add_match").invokeExact(conn, rule, error) as Unit
                 if ((bindings.handle("dbus_error_is_set").invokeExact(error) as Int) != 0) {
                     log.warn("AddMatch for notification signals failed, events will not arrive")
@@ -524,15 +626,16 @@ internal class FreedesktopNotifier private constructor(
         /**
          * Synchronous `GetCapabilities` on whichever thread owns [conn] right now:
          * the caller during setup, the dispatch thread afterwards. Returns the
-         * server's capability strings, or null when the call fails, typically
-         * because no daemon is running yet.
+         * server's capability strings and the unique bus name of the server that
+         * answered, or null when the call fails, typically because no daemon is
+         * running yet.
          */
         private fun queryCapabilities(
             bindings: DBusBindings,
             conn: MemorySegment,
             arena: Arena,
             timeoutMs: Int,
-        ): List<String>? {
+        ): Pair<List<String>, String>? {
             val msg = bindings.handle("dbus_message_new_method_call").invokeExact(
                 arena.allocateUtf8(BUS_NAME),
                 arena.allocateUtf8(OBJECT_PATH),
@@ -552,6 +655,7 @@ internal class FreedesktopNotifier private constructor(
                     return null
                 }
                 try {
+                    val sender = bindings.readMessageString("dbus_message_get_sender", reply) ?: return null
                     val caps = mutableListOf<String>()
                     Arena.ofConfined().use { call ->
                         val iter = call.allocate(bindings.messageIterLayout)
@@ -570,7 +674,7 @@ internal class FreedesktopNotifier private constructor(
                             bindings.handle("dbus_message_iter_next").invokeExact(sub) as Int
                         }
                     }
-                    return caps
+                    return caps to sender
                 } finally {
                     runCatching { bindings.handle("dbus_message_unref").invokeExact(reply) as Unit }
                 }
